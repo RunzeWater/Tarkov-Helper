@@ -2,5 +2,6 @@
   "appId": "dev.runze.tarkovhelper",
   "appName": "塔科夫助手",
   "webDir": "www",
-  "android": { "backgroundColor": "#17150f" }
+  "android": { "backgroundColor": "#17150f" },
+  "plugins": { "CapacitorHttp": { "enabled": true } }
 }
