@@ -129,7 +129,7 @@ textarea { width: 100%; font: 12px/1.4 var(--mono); resize: vertical; }
 .btn.danger { background: transparent; color: var(--bad); border-color: color-mix(in srgb, var(--bad) 55%, transparent); }
 .btn.sm { padding: 6px 10px; font-size: 14px; }
 .actions { display: flex; gap: 8px; flex-wrap: wrap; }
-.link { color: var(--accent); font-size: 13px; padding: 4px 0; }
+.link { color: var(--accent); font-size: 13px; padding: 4px 0; align-self: flex-start; }
 
 /* sheet */
 .sheet { position: fixed; inset: 0; z-index: 1000; }

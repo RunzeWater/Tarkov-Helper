@@ -150,28 +150,61 @@ function renderView() {
   destroyMap();
   const v = $("#view");
   v.className = "view view-" + S.tab;
-  if (!G.ready && S.tab !== "settings" && S.tab !== "prices") { v.innerHTML = loadingHTML(); return; }
+  if (!G.ready && S.tab !== "settings") { v.innerHTML = loadingHTML(); return; }
   ({ tasks: renderTasks, map: renderMap, items: renderItems, prices: renderPrices, settings: renderSettings })[S.tab]();
 }
 let loadError = null;
+let loadProgress = null;
+function progressText() { return loadProgress ? t("loadingProgress", { d: loadProgress[0], n: loadProgress[1] }) : ""; }
 function loadingHTML() {
   if (loadError) return `<div class="state"><p>${esc(t("loadFail", { msg: loadError }))}</p><button class="btn" data-act="retry">${esc(t("retry"))}</button></div>`;
-  return `<div class="state"><div class="spinner" aria-hidden="true"></div><p>${esc(t("loading"))}</p></div>`;
+  return `<div class="state"><div class="spinner" aria-hidden="true"></div><p>${esc(t("loading"))}</p>
+    <p id="load-progress" class="hint">${esc(progressText())}</p><p class="hint">${esc(t("loadingHint"))}</p></div>`;
+}
+const onProgress = (d, n) => { loadProgress = [d, n]; const p = $("#load-progress"); if (p) p.textContent = progressText(); };
+
+function applyData(r) {
+  api.useModel(r.data);
+  indexData(r.data);
+  G.fetchedAt = r.fetchedAt; G.stale = !!r.stale; G.ready = true;
 }
 
 async function loadData(force = false) {
   loadError = null;
+  loadProgress = null;
   if (!G.ready) renderView();
+  const lang = getLang(), mode = S.mode;
   try {
-    const r = await api.loadGameData(getLang(), S.mode, force);
-    indexData(r.data);
-    G.fetchedAt = r.fetchedAt; G.stale = !!r.stale; G.ready = true;
+    const r = await api.loadGameData(lang, mode, { force, onProgress });
+    if (lang !== getLang() || mode !== S.mode) return; // settings changed while loading
+    applyData(r);
+    if (force && r.stale) toast(t("loadFail", { msg: r.error?.message || "" }));
+    if (r.fromCache && !r.stale && Date.now() - r.fetchedAt > api.MAX_AGE) backgroundRefresh();
   } catch (e) {
-    loadError = e.message || String(e);
-    G.ready = false;
+    if (lang !== getLang() || mode !== S.mode) return;
+    if (G.ready) toast(t("loadFail", { msg: e.message || String(e) }));
+    else loadError = e.message || String(e);
   }
   renderDataline();
   renderView();
+}
+
+// Show cached data right away, then quietly download fresh data.
+let refreshing = false;
+async function backgroundRefresh() {
+  if (refreshing) return;
+  refreshing = true;
+  const lang = getLang(), mode = S.mode;
+  try {
+    const r = await api.loadGameData(lang, mode, { force: true });
+    if (lang !== getLang() || mode !== S.mode || r.stale) return;
+    applyData(r);
+    renderDataline();
+    // don't yank the map or an open detail panel out from under the user
+    if (S.tab !== "map" && !sheetOpen) renderView();
+  } catch { /* keep using the cached copy */ } finally {
+    refreshing = false;
+  }
 }
 
 /* ---------- tasks ---------- */
@@ -586,23 +619,20 @@ function renderPrices() {
       <p class="hint">${esc(t("priceHint"))}</p>
     </div>
     <ul id="price-list" class="list prices"></ul>`;
-  const run = debounce(async (q) => {
+  const run = debounce((q) => {
     lastPriceQuery = q;
-    if (q.length < 2) { showPopular(); return; }
-    setPriceList(`<li class="empty"><div class="spinner sm"></div></li>`);
-    try { priceResults = await api.searchItems(q, getLang(), S.mode); if (q === lastPriceQuery) paintPrices(priceResults); }
-    catch (e) { setPriceList(`<li class="empty">${esc(t("loadFail", { msg: e.message }))}</li>`); }
-  }, 350);
+    if (!searchable(q)) { showPopular(); return; }
+    priceResults = api.searchItems(q);
+    paintPrices(priceResults);
+  }, 200);
   $("#price-q").addEventListener("input", (e) => run(e.target.value.trim()));
-  if (lastPriceQuery.length >= 2 && priceResults) paintPrices(priceResults); else showPopular();
+  if (searchable(lastPriceQuery) && priceResults) paintPrices(priceResults); else showPopular();
 }
+// two Latin characters, or a single Chinese character, is enough to search
+const searchable = (q) => q.length >= 2 || /[㐀-鿿]/.test(q);
 function setPriceList(html) { const ul = $("#price-list"); if (ul) ul.innerHTML = html; }
-async function showPopular() {
-  setPriceList(`<li class="sub">${esc(t("popular"))}</li><li class="empty"><div class="spinner sm"></div></li>`);
-  try {
-    const items = await api.itemsByIds(POPULAR, getLang(), S.mode);
-    if (lastPriceQuery.length < 2) paintPrices(items, true);
-  } catch (e) { setPriceList(`<li class="empty">${esc(t("loadFail", { msg: e.message }))}</li>`); }
+function showPopular() {
+  paintPrices(api.itemsByIds(POPULAR), true);
 }
 function paintPrices(items, popular = false) {
   if (!items.length) { setPriceList(`<li class="empty">${esc(t("noResult"))}</li>`); return; }
@@ -623,11 +653,9 @@ function barterHTML(b) {
   return `<li class="barter"><p class="eyebrow">${esc(b.trader?.name)} · ${esc(t("lv", { n: b.level }))}${b.buyLimit ? ` · max ${b.buyLimit}` : ""}</p>
     <div class="bx"><div class="ichips">${side(b.requiredItems || [])}</div><span class="arrow">→</span><div class="ichips">${side(b.rewardItems || [])}</div></div></li>`;
 }
-async function openItem(id) {
+function openItem(id) {
   openSheet(`<div class="state"><div class="spinner"></div></div>`);
-  let it;
-  try { it = await api.itemDetail(id, getLang(), S.mode); }
-  catch (e) { $("#sheet-body").innerHTML = `<div class="state"><p>${esc(t("loadFail", { msg: e.message }))}</p></div>`; return; }
+  const it = api.itemDetail(id);
   if (!it) { $("#sheet-body").innerHTML = `<div class="state"><p>${esc(t("noResult"))}</p></div>`; return; }
   const sells = (it.sellFor || []).slice().sort((a, b) => (b.priceRUB || 0) - (a.priceRUB || 0));
   const buys = (it.buyFor || []).slice().sort((a, b) => (a.priceRUB || 0) - (b.priceRUB || 0));
@@ -729,7 +757,12 @@ document.addEventListener("click", async (e) => {
     case "mode": if (v !== S.mode) { S.mode = v; save(); G.ready = false; priceResults = null; renderView(); await loadData(); } break;
     case "faction": S.faction = v; save(); renderSettings(); break;
     case "lvl": { S.level = Math.max(1, Math.min(79, S.level + parseInt(el.dataset.d, 10))); save(); $("#lvl").value = S.level; break; }
-    case "refresh": await loadData(true); toast(t("updated", { time: ago(G.fetchedAt) })); break;
+    case "refresh": {
+      el.disabled = true; el.textContent = t("loading");
+      await loadData(true);
+      if (G.ready && !G.stale) toast(t("updated", { time: ago(G.fetchedAt) }));
+      break;
+    }
     case "copy-progress": {
       const ta = $("#progress-text");
       try { await navigator.clipboard.writeText(ta.value); toast(t("copied")); } catch { ta.select(); }
