@@ -72,7 +72,7 @@ button > svg, .search > svg { width: 20px; height: 20px; fill: none; stroke: cur
 /* filters */
 .filters { display: flex; flex-direction: column; gap: 10px; padding: 12px max(16px, env(safe-area-inset-right, 0px)) 8px max(16px, env(safe-area-inset-left, 0px)); }
 .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-.row > select { flex: 1 1 140px; min-width: 0; }
+.row > select { flex: 1 1 112px; min-width: 0; }
 .search { display: flex; align-items: center; gap: 8px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); padding: 0 12px; }
 .search svg { color: var(--muted); flex: none; }
 .search input { flex: 1; min-width: 0; background: none; border: 0; padding: 11px 0; outline: none; }
@@ -207,7 +207,7 @@ textarea { width: 100%; font: 12px/1.4 var(--mono); resize: vertical; }
 .pop .btn { margin-top: 6px; align-self: flex-start; }
 .leaflet-bar a { background: var(--panel); color: var(--fg); border-color: var(--line) !important; }
 .exfil { background: none; border: 0; }
-.exfil span { display: inline-block; transform: translate(-50%, -50%); white-space: nowrap; font: 600 12.5px/1 var(--display); letter-spacing: .03em; padding: 4px 6px; border-radius: 3px; color: #10120c; background: var(--ok); box-shadow: 0 0 0 1px rgb(0 0 0 / .6), 0 1px 4px rgb(0 0 0 / .55); cursor: pointer; }
+.exfil span { display: inline-block; transform: translate(-50%, -50%); white-space: nowrap; font: 600 calc(12.5px * var(--lzx, 1))/1 var(--display); letter-spacing: .03em; padding: 4px 6px; border-radius: 3px; color: #10120c; background: var(--ok); box-shadow: 0 0 0 1px rgb(0 0 0 / .6), 0 1px 4px rgb(0 0 0 / .55); cursor: pointer; }
 .exfil.transit span { background: var(--transit); }
 .exfil.flash span { animation: exflash 1.1s ease-out 3; }
 @keyframes exflash { 0% { box-shadow: 0 0 0 0 rgb(255 255 255 / .95), 0 1px 4px rgb(0 0 0 / .55); } 100% { box-shadow: 0 0 0 16px rgb(255 255 255 / 0), 0 1px 4px rgb(0 0 0 / .55); } }
@@ -339,3 +339,28 @@ body.map-fs .map-note { top: calc(12px + env(safe-area-inset-top, 0px)); }
 .trk-objs .dot { margin-top: 6px; border-radius: 50%; }
 .trk-desc { flex: 1; min-width: 0; font-size: 14px; line-height: 1.4; }
 .chip.sm { padding: 5px 10px; font-size: 12px; flex: none; }
+
+/* ---------- trader loyalty levels ---------- */
+.row > select.ll-sel { flex: 0 1 100px; }
+.tag.ll { font-family: var(--mono); font-weight: 500; font-size: 11px; }
+.tag.ll.short { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 50%, transparent); }
+.ll-short { color: var(--warn); }
+.ll-short small { color: var(--muted); }
+.tip { display: flex; align-items: flex-start; gap: 8px; background: var(--panel); border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--line)); border-radius: var(--r); padding: 8px 6px 8px 12px; }
+.tip p { margin: 0; flex: 1; font-size: 13px; color: var(--fg); }
+.tip .link { flex: none; padding-top: 0; white-space: nowrap; }
+.icon-btn.sm { width: 28px; height: 28px; }
+.icon-btn.sm svg { width: 16px; height: 16px; }
+.ll-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 6px 16px; }
+.ll-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--line); }
+.ll-row .num { color: var(--fg); }
+.facts b small.src { margin-left: 4px; font: 600 10px/1 var(--display); letter-spacing: .06em; color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 50%, transparent); border-radius: 3px; padding: 1px 3px; vertical-align: 2px; }
+
+/* ---------- community maps and landmark names ---------- */
+.map-bar select.base-sel { flex: 0 1 128px; }
+.landmark { background: none; border: 0; pointer-events: none; }
+.landmark span { display: inline-block; white-space: nowrap; font: 700 13px/1.1 var(--display); letter-spacing: .02em; color: #f6ecca;
+  text-shadow: 0 0 2px #000, 0 0 3px #000, 0 1px 4px rgb(0 0 0 / .9); }
+.exfil.dim span { opacity: .45; }
+.legend .lg-credit { display: block; width: 100%; font-size: 10px; }
+.legend .lg-credit a { color: inherit; }

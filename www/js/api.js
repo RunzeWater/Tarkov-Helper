@@ -4,7 +4,7 @@
 // in IndexedDB so the app opens instantly and still works offline.
 const BASE = "https://json.tarkov.dev/";
 export const MAX_AGE = 3 * 60 * 60 * 1000; // refresh in the background after 3 hours
-const CACHE_VERSION = 3;
+const CACHE_VERSION = 4;
 
 /* ---------- network ---------- */
 // Capacitor keeps the WebView's own fetch as CapacitorWebFetch. json.tarkov.dev allows
@@ -58,6 +58,8 @@ function makeTr(primary = {}, fallback = {}) {
   };
 }
 const xz = (p) => (p ? { x: p.x, z: p.z } : null);
+// height is kept for points: the community maps draw some floors side by side
+const xyz = (p) => (p ? { x: p.x, y: p.y ?? null, z: p.z } : null);
 
 export function slimBundle(raw, lang) {
   const tT = makeTr(raw.tasksL, raw.tasksEn);
@@ -81,12 +83,12 @@ export function slimBundle(raw, lang) {
         name: tM(e.name),
         nameEn: tMEn(e.name),
         faction: e.faction || "",
-        position: xz(e.position),
+        position: xyz(e.position),
         switches: (e.switches || (e.switch ? [e.switch] : [])).map((id) => switchName.get(id) || id),
         transferItem: e.transferItem ? { item: e.transferItem.item, count: e.transferItem.count } : null,
       })),
       transits: (m.transits || []).filter((x) => x && x.position).map((x) => ({
-        id: String(x.id), name: tM(x.description), nameEn: tMEn(x.description), target: x.map || null, position: xz(x.position),
+        id: String(x.id), name: tM(x.description), nameEn: tMEn(x.description), target: x.map || null, position: xyz(x.position),
       })),
     };
   });
@@ -136,7 +138,7 @@ export function slimBundle(raw, lang) {
         const k = `${z.map}:${z.position.x}:${z.position.z}`;
         if (seen.has(k)) continue;
         seen.add(k);
-        zones.push({ map: z.map, position: xz(z.position), outline: (z.outline || []).map(xz) });
+        zones.push({ map: z.map, position: xyz(z.position), outline: (z.outline || []).map(xz) });
       }
       return {
         id: o.id,
@@ -147,7 +149,7 @@ export function slimBundle(raw, lang) {
         foundInRaid: !!o.foundInRaid,
         maps: o.maps || [],
         zones,
-        possibleLocations: (o.possibleLocations || []).map((p) => ({ map: p.map, positions: (p.positions || []).map(xz) })),
+        possibleLocations: (o.possibleLocations || []).map((p) => ({ map: p.map, positions: (p.positions || []).map(xyz) })),
         items: o.items || [],
         questItem: o.questItem || null,
         markerItem: o.markerItem || null,
@@ -202,7 +204,7 @@ export function buildModel(b) {
     trader: trader(t.trader),
     map: t.map ? mapRef(t.map) : null,
     taskRequirements: t.taskRequirements.map((r) => ({ task: { id: r.task }, status: r.status })),
-    traderRequirements: t.traderRequirements.map((r) => ({ trader: { name: vendor(r.trader).name }, requirementType: r.requirementType, compareMethod: r.compareMethod, value: r.value })),
+    traderRequirements: t.traderRequirements.map((r) => ({ trader: { id: r.trader, ...vendor(r.trader) }, requirementType: r.requirementType, compareMethod: r.compareMethod, value: r.value })),
     objectives: t.objectives.map((o) => ({
       ...o,
       maps: o.maps.map(mapRef).filter(Boolean),
@@ -394,59 +396,79 @@ export function titleFromWikiUrl(url) {
   } catch { return null; }
 }
 
-// Content images (screenshots, annotated maps) with their captions; skips icons and infoboxes.
-export function parseWikiImages(html) {
-  const doc = new DOMParser().parseFromString(html, "text/html");
-  doc.querySelectorAll("br").forEach((br) => br.replaceWith(" "));
-  doc.querySelectorAll(".portable-infobox, aside, .navbox, .toc, .mw-editsection").forEach((el) => el.remove());
-  const seen = new Set();
+// The nodes under one "== Heading ==" of a parsed wiki page (Fandom wraps headings as <h2> or div.mw-heading2).
+function sectionNodes(doc, re) {
+  const root = doc.querySelector(".mw-parser-output") || doc.body;
+  const isH2 = (el) => el.tagName === "H2" || el.classList?.contains("mw-heading2");
+  const title = (el) => ((el.tagName === "H2" ? el : el.querySelector("h2"))?.textContent || "").replace(/\[[^\]]*\]/g, "").trim();
+  let on = false;
   const out = [];
-  for (const img of doc.querySelectorAll("img")) {
-    const src = img.getAttribute("data-src") || img.getAttribute("src") || "";
-    if (!/^https?:\/\/static\.wikia\.nocookie\.net\//.test(src)) continue;
-    const w = parseInt(img.getAttribute("width") || "0", 10);
-    const h = parseInt(img.getAttribute("height") || "0", 10);
-    if ((w && w < 100) || (h && h < 60)) continue; // item icons, flags, bullets
-    const key = src.replace(/\/revision\/.*$/, "");
-    if (seen.has(key)) continue;
-    seen.add(key);
-    const capEl = img.closest("figure")?.querySelector("figcaption")
-      || img.closest(".wikia-gallery-item")?.querySelector(".lightbox-caption")
-      || img.closest(".gallerybox")?.querySelector(".gallerytext")
-      || img.closest(".thumb")?.querySelector(".thumbcaption");
-    let caption = capEl ? capEl.textContent.replace(/\s+/g, " ").trim() : "";
-    if (!caption) {
-      const name = img.getAttribute("data-image-name") || img.getAttribute("alt") || "";
-      caption = name.replace(/\.(png|jpe?g|webp|gif)$/i, "").replace(/_/g, " ").trim();
-    }
-    out.push({ src, caption });
-    if (out.length >= 16) break;
+  for (const el of [...root.children]) {
+    if (isH2(el)) { on = re.test(title(el)); continue; }
+    if (on) out.push(el);
   }
   return out;
 }
 
-const imgPending = new Map();
-export function wikiTaskImages(title) {
-  if (!title) return Promise.resolve([]);
-  if (!imgPending.has(title)) imgPending.set(title, loadWikiTaskImages(title).finally(() => imgPending.delete(title)));
-  return imgPending.get(title);
+// Location screenshots and annotated maps with their captions; skips item icons.
+function collectImages(nodes) {
+  const seen = new Set();
+  const out = [];
+  for (const n of nodes) {
+    for (const img of n.tagName === "IMG" ? [n] : n.querySelectorAll("img")) {
+      const src = img.getAttribute("data-src") || img.getAttribute("src") || "";
+      if (!/^https?:\/\/static\.wikia\.nocookie\.net\//.test(src)) continue;
+      const w = parseInt(img.getAttribute("width") || "0", 10);
+      const h = parseInt(img.getAttribute("height") || "0", 10);
+      if ((w && w < 150) || (h && h < 80)) continue;
+      const name = img.getAttribute("data-image-name") || img.getAttribute("alt") || "";
+      if (/icon/i.test(name)) continue;
+      const key = src.replace(/\/revision\/.*$/, "");
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const capEl = img.closest("figure")?.querySelector("figcaption")
+        || img.closest(".wikia-gallery-item")?.querySelector(".lightbox-caption")
+        || img.closest(".gallerybox")?.querySelector(".gallerytext")
+        || img.closest(".thumb")?.querySelector(".thumbcaption");
+      let caption = capEl ? capEl.textContent.replace(/\s+/g, " ").trim() : "";
+      if (!caption) caption = name.replace(/\.(png|jpe?g|webp|gif)$/i, "").replace(/_/g, " ").trim();
+      out.push({ src, caption });
+      if (out.length >= 16) return out;
+    }
+  }
+  return out;
 }
-async function loadWikiTaskImages(title) {
-  const key = `wikiimg:v1:${title}`;
+
+// From a quest page: the EXP reward (tarkov.dev's value can lag behind game patches) and the
+// Guide section's location photos.
+export function parseWikiTaskPage(html) {
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  doc.querySelectorAll("br").forEach((br) => br.replaceWith(" "));
+  doc.querySelectorAll(".portable-infobox, aside, .navbox, .toc, .mw-editsection").forEach((el) => el.remove());
+  const rewards = sectionNodes(doc, /^rewards?$/i).map((n) => n.textContent).join(" ").replace(/\s+/g, " ");
+  const m = rewards.match(/\+\s*(\d[\d,. ]*)\s*EXP/i);
+  const exp = m ? parseInt(m[1].replace(/[^\d]/g, ""), 10) || null : null;
+  const guide = sectionNodes(doc, /^(guide|walkthrough|location)/i);
+  return { exp, images: collectImages(guide.length ? guide : [doc.body]) };
+}
+
+const infoPending = new Map();
+export function wikiTaskInfo(title) {
+  if (!title) return Promise.resolve({ exp: null, images: [] });
+  if (!infoPending.has(title)) infoPending.set(title, loadWikiTaskInfo(title).finally(() => infoPending.delete(title)));
+  return infoPending.get(title);
+}
+async function loadWikiTaskInfo(title) {
+  const key = `wikiinfo:v1:${title}`;
   const cached = await cacheGet(key);
-  if (cached && Date.now() - cached.fetchedAt < WIKI_MAX_AGE) return cached.images;
+  if (cached && Date.now() - cached.fetchedAt < WIKI_MAX_AGE) return cached.info;
   try {
-    const sec = await wikiJson({ action: "parse", page: title, prop: "sections" });
-    // Quest pages explain where to go in a "Guide" section; fall back to the whole page.
-    const guide = (sec.parse?.sections || []).find((s) => /^\d+$/.test(s.index) && /^(guide|walkthrough|location)/i.test(s.line.trim()));
-    const params = { action: "parse", page: title, prop: "text", disablelimitreport: "1" };
-    if (guide) params.section = guide.index;
-    const j = await wikiJson(params);
-    const images = parseWikiImages(j.parse?.text?.["*"] || "");
-    await cacheSet(key, { images, fetchedAt: Date.now() });
-    return images;
+    const j = await wikiJson({ action: "parse", page: title, prop: "text", disablelimitreport: "1" });
+    const info = parseWikiTaskPage(j.parse?.text?.["*"] || "");
+    await cacheSet(key, { info, fetchedAt: Date.now() });
+    return info;
   } catch (e) {
-    if (cached) return cached.images;
+    if (cached) return cached.info;
     throw e;
   }
 }

@@ -1,6 +1,8 @@
 import { t, setLang, getLang, ago } from "./i18n.js";
 import * as api from "./api.js";
 import { MAP_CONFIG } from "./maps-config.js";
+import { HK_MAPS, HK_TILES, HK_SITE } from "./hk-maps.js";
+import { LANDMARK_ZH } from "./landmarks.js";
 
 /* ---------- helpers ---------- */
 const $ = (s, el = document) => el.querySelector(s);
@@ -16,9 +18,11 @@ const STORE_KEY = "tkh.v1";
 const DEFAULTS = {
   lang: "zh", mode: "regular", level: 1, faction: "USEC",
   done: {}, objDone: {}, have: {}, tracked: {},
+  ll: {}, llTipHidden: false, // trader loyalty levels by trader id (1-4)
   tab: "tasks",
-  f: { q: "", trader: "", map: "", status: "available", kappa: false, lk: false },
-  mapKey: "customs", mapScope: "available", mapExtracts: true, mapLayer: "sat", mapFloor: {},
+  f: { q: "", trader: "", map: "", ll: "", status: "available", kappa: false, lk: false },
+  mapKey: "customs", mapScope: "available", mapExtracts: true, mapLabels: true, mapLayer: "sat", mapFloor: {},
+  mapBase: "hk", hkLayer: {}, // "hk" = community map art when there is one for the map, else tarkov.dev's
   itemScope: "open", itemFir: false,
 };
 let S = structuredClone(DEFAULTS);
@@ -52,10 +56,15 @@ function indexData(data) {
 }
 
 function factionOk(task) { return !task.factionName || task.factionName === "Any" || task.factionName === S.faction; }
+// Since patch 1.1 most side quests are gated by the trader's loyalty level (LL1-4) instead of quest chains.
+const llReqs = (task) => (task.traderRequirements || []).filter((r) => r?.trader?.id && r.requirementType === "level" && r.value > 1);
+const traderLL = (id) => S.ll[id] || 1;
+function taskLL(task) { return llReqs(task).reduce((m, r) => Math.max(m, r.value), 1); }
 function statusOf(task) {
   if (!factionOk(task)) return "na";
   if (S.done[task.id]) return "done";
   if ((task.minPlayerLevel || 0) > S.level) return "locked";
+  if (llReqs(task).some((r) => traderLL(r.trader.id) < r.value)) return "locked";
   for (const r of task.taskRequirements || []) {
     if (!r?.task || !G.byId.has(r.task.id)) continue;
     const st = r.status || [];
@@ -81,11 +90,11 @@ function objPoints(o) {
   const pts = [];
   for (const z of o.zones || []) {
     const key = cfgKeyFor(z?.map?.normalizedName);
-    if (key && z.position) pts.push({ key, x: z.position.x, z: z.position.z, outline: z.outline });
+    if (key && z.position) pts.push({ key, x: z.position.x, y: z.position.y ?? null, z: z.position.z, outline: z.outline });
   }
   for (const pl of o.possibleLocations || []) {
     const key = cfgKeyFor(pl?.map?.normalizedName);
-    for (const p of pl?.positions || []) if (key && p) pts.push({ key, x: p.x, z: p.z });
+    for (const p of pl?.positions || []) if (key && p) pts.push({ key, x: p.x, y: p.y ?? null, z: p.z });
   }
   return pts;
 }
@@ -227,6 +236,7 @@ function filteredTasks() {
     else if (f.status !== "all" && st !== f.status) return false;
     if (f.trader && task.trader.normalizedName !== f.trader) return false;
     if (f.map && !taskOnMap(task, f.map)) return false;
+    if (f.ll && taskLL(task) !== Number(f.ll)) return false;
     if (f.kappa && !task.kappaRequired) return false;
     if (f.lk && !task.lightkeeperRequired) return false;
     return taskMatches(task, f.q);
@@ -246,18 +256,23 @@ function renderTasks() {
           ${G.traders.map((x) => `<option value="${esc(x.normalizedName)}" ${f.trader === x.normalizedName ? "selected" : ""}>${esc(x.name)}</option>`).join("")}</select>
         <select id="task-map" aria-label="${esc(t("map"))}"><option value="">${esc(t("allMaps"))}</option>
           ${mapOpts.map((m) => `<option value="${esc(m.normalizedName)}" ${f.map === m.normalizedName ? "selected" : ""}>${esc(m.name)}</option>`).join("")}</select>
+        <select id="task-ll" class="ll-sel" aria-label="${esc(t("llFilter"))}"><option value="">${esc(t("llAll"))}</option>
+          ${[1, 2, 3, 4].map((n) => `<option value="${n}" ${String(f.ll) === String(n) ? "selected" : ""}>LL${n}</option>`).join("")}</select>
       </div>
       <div class="row chips">
         <button class="chip" data-act="kappa" aria-pressed="${f.kappa}">${esc(t("kappaOnly"))}</button>
         <button class="chip" data-act="lk" aria-pressed="${f.lk}">${esc(t("lkOnly"))}</button>
         <span id="task-count" class="count"></span>
       </div>
+      ${!Object.keys(S.ll).length && !S.llTipHidden ? `<div class="tip"><p>${esc(t("llTip"))}</p>
+        <button class="link" data-act="goto-settings">${esc(t("llTipGo"))}</button><button class="icon-btn sm" data-act="ll-tip-hide" aria-label="${esc(t("close"))}"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>` : ""}
     </div>
     <ul id="task-list" class="list"></ul>`;
   renderTaskList();
   $("#task-q").addEventListener("input", debounce((e) => { S.f.q = e.target.value.trim(); save(); renderTaskList(); }, 200));
   $("#task-trader").addEventListener("change", (e) => { S.f.trader = e.target.value; save(); renderTaskList(); });
   $("#task-map").addEventListener("change", (e) => { S.f.map = e.target.value; save(); renderTaskList(); });
+  $("#task-ll").addEventListener("change", (e) => { S.f.ll = e.target.value; save(); renderTaskList(); });
 }
 function objProgress(task) {
   const req = (task.objectives || []).filter((o) => o && !o.optional);
@@ -273,6 +288,8 @@ function renderTaskList() {
     const tracked = !!S.tracked[task.id];
     const [d, n] = objProgress(task);
     const maps = taskMapNames(task);
+    const ll = taskLL(task);
+    const llShort = ll > 1 && llReqs(task).some((r) => traderLL(r.trader.id) < r.value);
     return `<li class="task st-${st}">
       <button class="check" data-act="toggle-done" data-id="${task.id}" aria-pressed="${st === "done"}" aria-label="${esc(st === "done" ? t("markUndone") : t("markDone"))}"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></button>
       <button class="task-main" data-act="open-task" data-id="${task.id}">
@@ -280,6 +297,7 @@ function renderTaskList() {
         <span class="task-meta"><b>${esc(task.trader.name)}</b>${maps.length ? ` · ${esc(maps.slice(0, 2).join(" / "))}${maps.length > 2 ? "…" : ""}` : ` · ${esc(t("anyMap"))}`}</span>
         <span class="task-tags">
           <span class="tag lv">LV ${task.minPlayerLevel || 1}</span>
+          <span class="tag ll${llShort ? " short" : ""}">LL${ll}</span>
           ${task.kappaRequired ? `<span class="tag k">${esc(t("kappa"))}</span>` : ""}
           ${task.lightkeeperRequired ? `<span class="tag lk">${esc(t("lightkeeper"))}</span>` : ""}
           ${n ? `<span class="tag prog">${d}/${n}</span>` : ""}
@@ -332,11 +350,29 @@ function photosBlock(task) {
   if (!task.wikiLink) return "";
   return `<h3>${esc(t("locPhotos"))}</h3><div id="task-photos" class="gallery-wrap"><div class="gal-state"><div class="spinner sm" aria-hidden="true"></div><span>${esc(t("photosLoading"))}</span></div></div>`;
 }
+// The quest's wiki page also gives the current EXP reward; tarkov.dev's number can lag behind patches.
+const WIKI_EXP = new Map();
+function expHTML(task) {
+  const w = WIKI_EXP.get(task.id);
+  return w && w !== task.experience ? `${fmtNum(w)}<small class="src">Wiki</small>` : fmtNum(task.experience);
+}
+function showWikiExp(task, exp) {
+  if (!exp || exp === task.experience) return;
+  WIKI_EXP.set(task.id, exp);
+  const a = $("#fact-exp"), b = $("#rew-exp"), note = $("#exp-note");
+  if (a) a.innerHTML = expHTML(task);
+  if (b) b.textContent = `+${fmtNum(exp)}`;
+  if (note) { note.hidden = false; note.textContent = t("expWikiNote", { wiki: fmtNum(exp), dev: fmtNum(task.experience) }); }
+}
 function loadTaskPhotos(task) {
-  if (!task.wikiLink || !$("#task-photos")) return;
+  if (!task.wikiLink) return;
   const token = ++photoToken;
   const show = (html) => { const box = $("#task-photos"); if (box && token === photoToken) box.innerHTML = html; };
-  api.wikiTaskImages(api.titleFromWikiUrl(task.wikiLink)).then((imgs) => {
+  api.wikiTaskInfo(api.titleFromWikiUrl(task.wikiLink)).then((info) => {
+    if (token !== photoToken || !sheetOpen) return;
+    showWikiExp(task, info?.exp);
+    const imgs = info?.images || [];
+    if (!$("#task-photos")) return;
     if (!imgs.length) { show(`<p class="hint">${esc(t("photosNone"))}</p>`); return; }
     show(`<div class="gallery">${imgs.map((im) => `<button class="gal-item" data-act="view-photo" data-src="${esc(api.wikiImage(im.src, 1600))}" data-cap="${esc(im.caption)}">
         <img src="${esc(api.wikiImage(im.src, 560))}" alt="${esc(im.caption)}" referrerpolicy="no-referrer" loading="lazy" decoding="async">${im.caption ? `<span>${esc(im.caption)}</span>` : ""}</button>`).join("")}</div>
@@ -376,9 +412,10 @@ function openTask(id) {
     </div>
     <div class="facts">
       <div><span>${esc(t("level"))}</span><b>${task.minPlayerLevel || 1}</b></div>
-      <div><span>${esc(t("exp"))}</span><b>${fmtNum(task.experience)}</b></div>
+      <div><span>${esc(t("exp"))}</span><b id="fact-exp">${expHTML(task)}</b></div>
       <div><span>${esc(t("tabTasks"))}</span><b class="st-text st-${st}">${esc(t({ available: "stAvailable", locked: "stLocked", done: "stDone" }[st] || "stAll"))}</b></div>
     </div>
+    <p id="exp-note" class="hint" ${WIKI_EXP.has(id) ? "" : "hidden"}>${WIKI_EXP.has(id) ? esc(t("expWikiNote", { wiki: fmtNum(WIKI_EXP.get(id)), dev: fmtNum(task.experience) })) : ""}</p>
     <div class="row chips">
       ${task.kappaRequired ? `<span class="tag k">${esc(t("kappa"))}</span>` : ""}
       ${task.lightkeeperRequired ? `<span class="tag lk">${esc(t("lightkeeper"))}</span>` : ""}
@@ -412,14 +449,18 @@ function openTask(id) {
         </div></li>`;
     }).join("")}</ol>
 
-    ${trReq.length ? `<h3>${esc(t("traderLevel"))}</h3><p class="plain">${trReq.map((r) => `${esc(r.trader.name)} ${r.requirementType === "level" ? "LL" : esc(r.requirementType || "")}${esc(r.compareMethod === ">=" ? "" : r.compareMethod || "")}${r.value}`).join(" · ")}</p>` : ""}
+    ${trReq.length ? `<h3>${esc(t("traderLevel"))}</h3><p class="plain">${trReq.map((r) => {
+      const isLL = r.requirementType === "level";
+      const short = isLL && traderLL(r.trader.id) < r.value;
+      return `<span class="${short ? "ll-short" : ""}">${esc(r.trader.name)} ${isLL ? "LL" : esc(r.requirementType || "")}${esc(r.compareMethod === ">=" ? "" : r.compareMethod || "")}${r.value}${short ? ` <small>${esc(t("llYours", { n: traderLL(r.trader.id) }))}</small>` : ""}</span>`;
+    }).join(" · ")}</p>` : ""}
 
     <h3>${esc(t("prereqs"))}</h3>
     <div class="tlinks">${prereqs.length ? prereqs.map((r) => taskLink(r.task.id)).join("") : `<p class="plain muted">${esc(t("none"))}</p>`}</div>
 
     <h3>${esc(t("rewards"))}</h3>
     <div class="ichips">
-      <span class="ichip"><span>${esc(t("exp"))}</span><b>+${fmtNum(task.experience)}</b></span>
+      <span class="ichip"><span>${esc(t("exp"))}</span><b id="rew-exp">+${fmtNum(WIKI_EXP.get(id) || task.experience)}</b></span>
       ${(rew.traderStanding || []).filter((s) => s?.trader).map((s) => `<span class="ichip"><span>${esc(s.trader.name)} ${esc(t("standing"))}</span><b>${s.standing > 0 ? "+" : ""}${s.standing}</b></span>`).join("")}
       ${(rew.items || []).filter((r) => r?.item).map((r) => itemChip(r.item, r.count)).join("")}
     </div>
@@ -465,6 +506,9 @@ let SVGSTATE = null;
 let EXTRACT_MARKERS = new Map();
 let lmapKey = null;
 let lastView = null; // keep the user's zoom and position when the map is redrawn
+// game position -> map position for the base map being shown, plus a few view facts
+let PROJ = (p) => L.latLng(p.z, p.x);
+let VIEW = { hk: null, labels: [], fit: 2, focus: 3, inside: () => true, offFloor: () => false };
 function destroyMap() {
   if (LMAP) {
     try { lastView = { c: LMAP.getCenter(), z: LMAP.getZoom(), key: lmapKey }; } catch { /* map not ready */ }
@@ -516,21 +560,63 @@ function currentMapData(key = S.mapKey) {
   return G.maps.find((x) => x.normalizedName === key) || G.maps.find((x) => cfgKeyFor(x.normalizedName) === key);
 }
 
+/* Base maps: the community drawings shown on the HK player's interactive map (building names, floors,
+   room numbers) or tarkov.dev's satellite and abstract maps. */
+const BASE_LABEL = { hk: "baseHK", sat: "layerSat", svg: "layerAbs" };
+function baseOptions(key = S.mapKey) {
+  const cfg = MAP_CONFIG[key] || {};
+  const out = [];
+  if (HK_MAPS[key]) out.push("hk");
+  if (cfg.tilePath) out.push("sat");
+  if (cfg.svgPath) out.push("svg");
+  return out;
+}
+function currentBase(key = S.mapKey) {
+  const opts = baseOptions(key);
+  const want = S.mapBase === "hk" ? "hk" : S.mapLayer;
+  return opts.includes(want) ? want : opts.find((o) => o !== "hk") || opts[0] || null;
+}
+const hkLayerIndex = (hk) => Math.max(0, Math.min(hk.layers.length - 1, S.hkLayer[S.mapKey] || 0));
+// Image pixel of a game position. Factory's drawing shows each floor as its own panel.
+function hkPixel(hk, p) {
+  const [a, b, c, d, e, f] = hk.t;
+  let x = a * p.x + b * p.z + c;
+  const y = d * p.x + e * p.z + f;
+  if (hk.panels && p.y != null) {
+    const pn = hk.panels.find((q) => (q.minY != null && p.y >= q.minY) || (q.maxY != null && p.y <= q.maxY));
+    if (pn) x += pn.dx;
+  }
+  return [x, y];
+}
+// tarkov.dev label angles are for its own rotated map; turn them into the drawing's frame
+function hkAngle(cfg, hk, deg) {
+  const r = ((cfg.coordinateRotation || 0) * Math.PI) / 180, c = Math.cos(r), s = Math.sin(r);
+  const a = (deg * Math.PI) / 180, ux = Math.cos(a), uy = Math.sin(a);
+  const gx = c * ux - s * uy, gz = -s * ux - c * uy; // screen -> game direction (that matrix is its own inverse)
+  const [A, B, , D, E] = hk.t;
+  let out = (Math.atan2(D * gx + E * gz, A * gx + B * gz) * 180) / Math.PI;
+  if (out > 90) out -= 180; else if (out <= -90) out += 180;
+  return Math.round(out);
+}
+
 function renderMap() {
   const opts = mapOptions();
   if (!opts.find((o) => o.key === S.mapKey) && opts.length) S.mapKey = opts[0].key;
   const cfg = MAP_CONFIG[S.mapKey];
-  const both = cfg && cfg.tilePath && cfg.svgPath;
+  const bases = baseOptions();
+  const base = currentBase();
+  const hk = base === "hk" ? HK_MAPS[S.mapKey] : null;
   $("#view").innerHTML = `
     <div class="map-bar">
       <select id="map-select" aria-label="${esc(t("mapPick"))}">${opts.map((o) => `<option value="${o.key}" ${o.key === S.mapKey ? "selected" : ""}>${esc(o.name)}</option>`).join("")}</select>
+      ${bases.length > 1 ? `<select id="base-select" class="base-sel" aria-label="${esc(t("mapBase"))}">${bases.map((b) => `<option value="${b}" ${b === base ? "selected" : ""}>${esc(t(BASE_LABEL[b]))}</option>`).join("")}</select>` : ""}
       <div class="seg sm" role="group">
         <button data-act="map-scope" data-v="tracked" aria-pressed="${S.mapScope === "tracked"}">${esc(t("mapTracked"))}</button>
         <button data-act="map-scope" data-v="available" aria-pressed="${S.mapScope === "available"}">${esc(t("mapAvail"))}</button>
         <button data-act="map-scope" data-v="open" aria-pressed="${S.mapScope === "open"}">${esc(t("mapOpen"))}</button>
       </div>
       <button class="chip" data-act="map-extracts" aria-pressed="${S.mapExtracts}">${esc(t("mapExtracts"))}</button>
-      ${both ? `<button class="chip" data-act="map-layer">${esc(S.mapLayer === "sat" ? t("layerAbs") : t("layerSat"))}</button>` : ""}
+      ${cfg?.labels?.length ? `<button class="chip" data-act="map-labels" aria-pressed="${S.mapLabels}">${esc(t("mapLabels"))}</button>` : ""}
     </div>
     <div class="map-wrap"><div id="leaflet" class="leaflet-host"></div>
       <div class="map-ctrls">
@@ -546,26 +632,75 @@ function renderMap() {
         <span><i style="background:${objColor("findQuestItem")}"></i>${esc(t("lgQuestItem"))}</span>
         <span><i style="background:${objColor("shoot")}"></i>${esc(t("lgKill"))}</span>
         ${S.mapExtracts ? `<span><i class="sq"></i>${esc(t("mapExtracts"))}</span><span><i class="sq tr"></i>${esc(t("fac_transit"))}</span><span class="lg-hint">${esc(t("lgTap"))}</span>` : ""}
+        ${hk ? `<span class="lg-credit">${esc(t("hkCredit", { a: hk.credit }))} · <a href="${HK_SITE}" target="_blank" rel="noopener">Kenny#2085</a></span>` : ""}
       </div></div>`;
   $("#map-select").addEventListener("change", (e) => { S.mapKey = e.target.value; save(); renderView(); });
-  if (!cfg || !window.L) { const n = $("#map-note"); n.hidden = false; n.textContent = t("mapNotSupported"); return; }
-  buildLeaflet(cfg);
+  $("#base-select")?.addEventListener("change", (e) => {
+    const v = e.target.value;
+    if (v === "hk") S.mapBase = "hk"; else { S.mapBase = "tdev"; S.mapLayer = v; }
+    save(); renderView();
+  });
+  if (!cfg || !base || !window.L) { const n = $("#map-note"); n.hidden = false; n.textContent = t("mapNotSupported"); return; }
+  buildLeaflet(cfg, base);
+  if (hk && !S.hkNoteSeen) { S.hkNoteSeen = true; save(); toast(t("hkNote")); }
 }
 
-function buildLeaflet(cfg) {
-  const bounds = toBounds(cfg.bounds);
+function buildLeaflet(cfg, base) {
+  const hk = base === "hk" ? HK_MAPS[S.mapKey] : null;
+  const viewKey = `${S.mapKey}:${base}`;
+  let map, bounds;
   // zoomSnap 0.5: at half steps Leaflet uses the next tile level and scales it down, so tiles stay sharp
-  const map = (LMAP = L.map("leaflet", {
-    crs: makeCRS(cfg), minZoom: cfg.minZoom, maxZoom: cfg.maxZoom,
-    zoomSnap: 0.5, zoomDelta: 0.5, attributionControl: false, maxBounds: bounds.pad(0.6), maxBoundsViscosity: 0.8,
-  }));
-  lmapKey = S.mapKey;
-  const useTiles = cfg.tilePath && (S.mapLayer === "sat" || !cfg.svgPath);
-  if (useTiles) addTiles(cfg, bounds);
-  else if (cfg.svgPath) addSvg(cfg, bounds, map);
-  if (lastView && lastView.key === S.mapKey) map.setView(lastView.c, lastView.z, { animate: false });
-  else map.fitBounds(bounds);
+  if (hk) {
+    const [W, H] = hk.size;
+    const k = 2 ** Math.ceil(Math.log2(Math.max(W, H) / 256)); // image pixels per map unit (leaflet-rastercoords)
+    const maxTile = Math.max(...hk.layers.map((l) => l.maxZoom));
+    bounds = L.latLngBounds([-H / k, 0], [0, W / k]);
+    PROJ = (p) => { const [x, y] = hkPixel(hk, p); return L.latLng(-y / k, x / k); };
+    const lay = hk.layers[hkLayerIndex(hk)];
+    const m = 0.04;
+    VIEW = {
+      hk, labels: [],
+      inside: (ll) => ll.lng > (-m * W) / k && ll.lng < ((1 + m) * W) / k && ll.lat < (m * H) / k && ll.lat > (-(1 + m) * H) / k,
+      // Lab's floors are separate drawings: points on other floors are drawn faded
+      offFloor: (p) => p.y != null && ((lay.minY != null && p.y < lay.minY) || (lay.maxY != null && p.y > lay.maxY)),
+    };
+    map = LMAP = L.map("leaflet", {
+      crs: L.CRS.Simple, minZoom: -4, maxZoom: maxTile + 1,
+      zoomSnap: 0.5, zoomDelta: 0.5, attributionControl: false, maxBounds: bounds.pad(0.25), maxBoundsViscosity: 0.8,
+    });
+    addHkTiles(hk, bounds);
+  } else {
+    bounds = toBounds(cfg.bounds);
+    PROJ = (p) => L.latLng(p.z, p.x);
+    VIEW = { hk: null, labels: [], inside: () => true, offFloor: () => false };
+    map = LMAP = L.map("leaflet", {
+      crs: makeCRS(cfg), minZoom: cfg.minZoom, maxZoom: cfg.maxZoom,
+      zoomSnap: 0.5, zoomDelta: 0.5, attributionControl: false, maxBounds: bounds.pad(0.6), maxBoundsViscosity: 0.8,
+    });
+    if (base === "sat") addTiles(cfg, bounds);
+    else addSvg(cfg, bounds, map);
+  }
+  lmapKey = viewKey;
+  // Factory's drawing is four floors side by side: open on the ground floor, zoom out for the rest
+  let home = bounds;
+  if (hk?.view) { const k = 2 ** Math.ceil(Math.log2(Math.max(...hk.size) / 256)); home = L.latLngBounds([-hk.view[3] / k, hk.view[0] / k], [-hk.view[1] / k, hk.view[2] / k]); }
+  const all = map.getBoundsZoom(bounds);
+  VIEW.fit = map.getBoundsZoom(home);
+  if (hk) map.setMinZoom(Math.min(all, Math.floor(all * 2) / 2 - 0.5));
+  VIEW.focus = hk ? Math.min(map.getMaxZoom() - 1, Math.round(VIEW.fit * 2) / 2 + 2) : Math.min(cfg.maxZoom, cfg.minZoom + 2);
+  if (lastView && lastView.key === viewKey) map.setView(lastView.c, lastView.z, { animate: false });
+  else map.fitBounds(home);
 
+  if (hk && hk.layers.length > 1) {
+    const sel = $("#floor-select");
+    const cur = hkLayerIndex(hk);
+    sel.innerHTML = hk.layers.map((l, i) => `<option value="${i}" ${i === cur ? "selected" : ""}>${esc(getLang() === "zh" ? l.zh : l.en)}</option>`).join("");
+    sel.setAttribute("aria-label", t("hkLayer"));
+    sel.hidden = false;
+    sel.onchange = (e) => { S.hkLayer[S.mapKey] = Number(e.target.value); save(); destroyMap(); renderMap(); };
+  }
+
+  if (S.mapLabels) addLandmarks(map, cfg, hk);
   if (S.mapExtracts) addExtracts(map);
 
   const byObj = new Map();
@@ -584,10 +719,12 @@ function buildLeaflet(cfg) {
       const open = () => openObjective(task.id, o.id);
       const layers = [];
       pts.forEach((p, i) => {
+        const dim = VIEW.offFloor(p);
         if (p.outline?.length > 2) {
-          layers.push(L.polygon(p.outline.map((q) => [q.z, q.x]), { color, weight: 1.5, fillOpacity: 0.18 }).on("click", open).addTo(map));
+          const ring = p.outline.map((q) => PROJ({ x: q.x, y: p.y, z: q.z }));
+          layers.push(L.polygon(ring, { color, weight: 1.5, opacity: dim ? 0.35 : 1, fillOpacity: dim ? 0.06 : 0.18 }).on("click", open).addTo(map));
         }
-        const cm = L.circleMarker([p.z, p.x], { radius: trackedScope ? 9 : 7, color: "#17150f", weight: 2, fillColor: color, fillOpacity: 1 }).on("click", open).addTo(map);
+        const cm = L.circleMarker(PROJ(p), { radius: trackedScope ? 9 : 7, color: "#17150f", weight: 2, fillColor: color, opacity: dim ? 0.4 : 1, fillOpacity: dim ? 0.4 : 1 }).on("click", open).addTo(map);
         // your own picks are few, so name them on the map
         if (trackedScope && i === 0) cm.bindTooltip(esc(task.name), { permanent: true, direction: "right", offset: [10, 0], className: "qlabel" });
         layers.push(cm);
@@ -603,11 +740,15 @@ function buildLeaflet(cfg) {
     else n.textContent = t(trackedScope ? "mapTrackedNone" : "mapNoMarkers");
   }
 
+  const relabel = () => { scaleLabels(map); declutterLabels(); };
+  map.on("zoomend", relabel);
+  relabel();
+
   if (pendingFocus) {
     const layers = byObj.get(pendingFocus) || [];
     const mk = layers.find((l) => l instanceof L.CircleMarker);
     if (mk) {
-      map.setView(mk.getLatLng(), Math.min(cfg.maxZoom, cfg.minZoom + 2));
+      map.setView(mk.getLatLng(), Math.max(VIEW.focus, map.getZoom()));
       const ring = L.marker(mk.getLatLng(), { icon: L.divIcon({ className: "pulse", iconSize: [44, 44] }), interactive: false, keyboard: false }).addTo(map);
       setTimeout(() => { if (LMAP === map) map.removeLayer(ring); }, 3600);
     }
@@ -617,6 +758,64 @@ function buildLeaflet(cfg) {
     const { kind, id } = pendingExtract;
     pendingExtract = null;
     setTimeout(() => focusExtract(kind, id), 100);
+  }
+}
+
+// Community map tiles come straight from the author's GitHub repository (leaflet-rastercoords layout:
+// zoom levels 1..n, the deepest level is the drawing at full size).
+function addHkTiles(hk, bounds) {
+  const layer = hk.layers[hkLayerIndex(hk)];
+  const url = `${HK_TILES}${layer.path}/{z}/{x}/{y}.png`;
+  const retina = (window.devicePixelRatio || 1) >= 1.5;
+  const common = { bounds, minZoom: -6, maxZoom: LMAP.getMaxZoom(), keepBuffer: 3 };
+  L.tileLayer(url, retina
+    ? { ...common, tileSize: 128, zoomOffset: 1, minNativeZoom: 0, maxNativeZoom: layer.maxZoom - 1 }
+    : { ...common, tileSize: 256, minNativeZoom: 1, maxNativeZoom: layer.maxZoom }).addTo(LMAP);
+}
+
+// Landmark names (tarkov.dev's map labels, translated) in a pane under the quest markers.
+function addLandmarks(map, cfg, hk) {
+  const labels = cfg?.labels;
+  if (!labels?.length) return;
+  const pane = map.createPane("labels");
+  pane.style.zIndex = 350;
+  pane.style.pointerEvents = "none";
+  const zh = getLang() === "zh";
+  labels.forEach(([text, x, z, rot, size], i) => {
+    const ll = PROJ({ x, y: null, z });
+    if (!VIEW.inside(ll)) return;
+    const name = zh ? LANDMARK_ZH[text] || text : text;
+    const deg = hk ? hkAngle(cfg, hk, rot || 0) : rot || 0;
+    const fs = (((size || 100) / 100) * 13).toFixed(1);
+    const mk = L.marker(ll, {
+      pane: "labels", interactive: false, keyboard: false,
+      icon: L.divIcon({ className: "landmark", iconSize: null, html: `<span style="transform:translate(-50%,-50%) rotate(${deg}deg);font-size:calc(${fs}px * var(--lz, 1))">${esc(name)}</span>` }),
+    }).addTo(map);
+    VIEW.labels.push({ mk, rank: (size || 100) * 1000 - i });
+  });
+  VIEW.labels.sort((a, b) => b.rank - a.rank);
+}
+// Landmark and extract names grow a little as you zoom in.
+function scaleLabels(map) {
+  const f = 2 ** ((map.getZoom() - VIEW.fit) * 0.5);
+  const el = map.getContainer();
+  el.style.setProperty("--lz", Math.max(0.65, Math.min(1.55, 0.72 * f)).toFixed(2));
+  el.style.setProperty("--lzx", Math.max(0.85, Math.min(1.1, 0.85 * f)).toFixed(2));
+}
+// Hide landmark names that would overlap an extract name or a more important landmark.
+function declutterLabels() {
+  if (!VIEW.labels?.length) return;
+  const placed = [];
+  const hit = (r) => placed.some((q) => r.left < q.right && r.right > q.left && r.top < q.bottom && r.bottom > q.top);
+  const grow = (r, d) => ({ left: r.left - d, right: r.right + d, top: r.top - d, bottom: r.bottom + d });
+  for (const mk of EXTRACT_MARKERS.values()) { const sp = mk.getElement()?.firstElementChild; if (sp) placed.push(grow(sp.getBoundingClientRect(), 2)); }
+  for (const l of VIEW.labels) {
+    const sp = l.mk.getElement()?.firstElementChild;
+    if (!sp) continue;
+    const r = grow(sp.getBoundingClientRect(), 3);
+    const ok = !hit(r);
+    sp.style.visibility = ok ? "" : "hidden";
+    if (ok) placed.push(r);
   }
 }
 
@@ -697,9 +896,11 @@ function addExtracts(map) {
   if (!m) return;
   const add = (e, kind) => {
     if (!e?.position) return;
+    const ll = PROJ(e.position);
+    if (!VIEW.inside(ll)) return; // tarkov.dev lists a few extracts of neighbouring maps
     const cls = kind === "transit" ? "transit" : facKey(e.faction);
-    const mk = L.marker([e.position.z, e.position.x], {
-      icon: L.divIcon({ className: `exfil ${cls}`, html: `<span>${esc(e.name)}</span>`, iconSize: null }),
+    const mk = L.marker(ll, {
+      icon: L.divIcon({ className: `exfil ${cls}${VIEW.offFloor(e.position) ? " dim" : ""}`, html: `<span>${esc(e.name)}</span>`, iconSize: null }),
       keyboard: false, riseOnHover: true,
     }).addTo(map);
     mk.on("click", () => openExtract(kind, e.id));
@@ -802,8 +1003,7 @@ function focusExtract(kind, id) {
     if (!S.mapExtracts) { S.mapExtracts = true; save(); pendingExtract = { kind, id }; renderView(); }
     return;
   }
-  const cfg = MAP_CONFIG[S.mapKey];
-  LMAP.setView(mk.getLatLng(), Math.max(LMAP.getZoom(), Math.min(cfg.maxZoom, cfg.minZoom + 2)));
+  LMAP.setView(mk.getLatLng(), Math.max(LMAP.getZoom(), VIEW.focus));
   const el = mk.getElement();
   if (el) { el.classList.remove("flash"); void el.offsetWidth; el.classList.add("flash"); }
 }
@@ -1072,7 +1272,13 @@ function openItem(id) {
 /* ---------- settings ---------- */
 let resetArmed = false;
 function renderSettings() {
-  const exportText = JSON.stringify({ v: 1, done: Object.keys(S.done), objDone: Object.keys(S.objDone), have: S.have, level: S.level, faction: S.faction });
+  const exportText = JSON.stringify({ v: 2, done: Object.keys(S.done), objDone: Object.keys(S.objDone), tracked: Object.keys(S.tracked), have: S.have, level: S.level, faction: S.faction, ll: S.ll });
+  // traders whose quests need a loyalty level, in the usual trader order
+  const llTraders = [];
+  const seenTr = new Set();
+  for (const task of G.tasks) for (const r of llReqs(task)) if (!seenTr.has(r.trader.id)) { seenTr.add(r.trader.id); llTraders.push(r.trader); }
+  const order = (x) => { const i = TRADER_ORDER.indexOf(x.normalizedName); return i < 0 ? 99 : i; };
+  llTraders.sort((a, b) => order(a) - order(b));
   $("#view").innerHTML = `
     <div class="settings">
       <section><h3>${esc(t("settings"))}</h3>
@@ -1088,6 +1294,11 @@ function renderSettings() {
         <div class="field"><label for="lvl">${esc(t("playerLevel"))}</label>
           <div class="stepper"><button data-act="lvl" data-d="-1">−</button><input id="lvl" type="number" inputmode="numeric" min="1" max="79" value="${S.level}"><button data-act="lvl" data-d="1">+</button></div></div>
       </section>
+      ${llTraders.length ? `<section id="ll-section"><h3>${esc(t("llTitle"))}</h3>
+        <p class="plain muted">${esc(t("llHint"))}</p>
+        <div class="ll-grid">${llTraders.map((tr) => `<div class="ll-row"><span>${esc(tr.name)}</span>
+          <div class="stepper"><button data-act="ll" data-trader="${esc(tr.id)}" data-d="-1" aria-label="−">−</button><span class="num" data-ll-of="${esc(tr.id)}">LL${traderLL(tr.id)}</span><button data-act="ll" data-trader="${esc(tr.id)}" data-d="1" aria-label="+">+</button></div></div>`).join("")}</div>
+      </section>` : ""}
       <section><h3>${esc(t("data"))}</h3>
         <p class="plain muted">${G.ready ? esc(t("updated", { time: ago(G.fetchedAt) })) : ""}</p>
         <button class="btn" data-act="refresh">${esc(t("refresh"))}</button>
@@ -1139,7 +1350,18 @@ document.addEventListener("click", async (e) => {
     case "show-on-map": showOnMap(el.dataset.task, el.dataset.obj); break;
     case "map-scope": S.mapScope = v; save(); renderView(); break;
     case "map-extracts": S.mapExtracts = !S.mapExtracts; save(); renderView(); break;
-    case "map-layer": S.mapLayer = S.mapLayer === "sat" ? "svg" : "sat"; save(); renderView(); break;
+    case "map-labels": S.mapLabels = !S.mapLabels; save(); renderView(); break;
+    case "goto-settings": setTab("settings"); break;
+    case "ll-tip-hide": S.llTipHidden = true; save(); renderTasks(); break;
+    case "ll": {
+      const tid = el.dataset.trader;
+      const n = Math.max(1, Math.min(4, traderLL(tid) + parseInt(el.dataset.d, 10)));
+      S.ll[tid] = n;
+      save();
+      const out = document.querySelector(`[data-ll-of="${tid}"]`);
+      if (out) out.textContent = `LL${n}`;
+      break;
+    }
     case "map-fs": if (mapFs) history.back(); else enterFullscreen(); break;
     case "extract-list": openExtractList(); break;
     case "open-extract": openExtract(el.dataset.kind, id, true); break;
@@ -1176,6 +1398,8 @@ document.addEventListener("click", async (e) => {
         if (!Array.isArray(p.done)) throw new Error();
         S.done = Object.fromEntries(p.done.map((x) => [x, true]));
         S.objDone = Object.fromEntries((p.objDone || []).map((x) => [x, true]));
+        if (Array.isArray(p.tracked)) S.tracked = Object.fromEntries(p.tracked.map((x) => [x, true]));
+        if (p.ll && typeof p.ll === "object") S.ll = Object.fromEntries(Object.entries(p.ll).map(([k, n]) => [k, Math.max(1, Math.min(4, parseInt(n, 10) || 1))]));
         S.have = p.have || {}; if (p.level) S.level = p.level; if (p.faction) S.faction = p.faction;
         save(); toast(t("imported", { n: p.done.length })); renderSettings();
       } catch { toast(t("badImport")); }
@@ -1183,7 +1407,7 @@ document.addEventListener("click", async (e) => {
     }
     case "reset": {
       if (!resetArmed) { resetArmed = true; el.textContent = t("resetConfirm"); setTimeout(() => { resetArmed = false; if (el.isConnected) el.textContent = t("reset"); }, 4000); break; }
-      resetArmed = false; S.done = {}; S.objDone = {}; S.have = {}; save(); toast(t("resetDone")); renderSettings(); break;
+      resetArmed = false; S.done = {}; S.objDone = {}; S.have = {}; S.tracked = {}; save(); toast(t("resetDone")); renderSettings(); break;
     }
   }
 });
