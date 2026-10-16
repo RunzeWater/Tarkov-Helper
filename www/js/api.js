@@ -64,20 +64,43 @@ query ItemDetail($id: ID, $lang: LanguageCode, $mode: GameMode) {
   }
 }`;
 
-async function gql(query, variables) {
-  const res = await fetch(ENDPOINT, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify({ query, variables }),
-  });
-  if (!res.ok) {
-    let detail = "";
-    try { const j = await res.json(); detail = j.errors?.[0]?.message || JSON.stringify(j).slice(0, 200); } catch { /* no body */ }
+// Put variable values straight into the query text so it can travel in a GET URL.
+const ENUM_VARS = new Set(["lang", "mode"]);
+export function inlineQuery(query, vars = {}) {
+  let q = query.replace(/query\s+(\w+)\s*\([^)]*\)/, "query $1");
+  q = q.replace(/(\w+)\s*:\s*\$(\w+)\s*,?\s*/g, (m, arg, k) => (vars[k] === undefined || vars[k] === null ? "" : m));
+  q = q.replace(/,\s*\)/g, ")").replace(/\(\s*\)/g, "");
+  return q.replace(/\$(\w+)/g, (_, k) => (ENUM_VARS.has(k) ? String(vars[k]) : JSON.stringify(vars[k])));
+}
+
+async function readResponse(res) {
+  let json = null;
+  try { json = await res.json(); } catch { /* not JSON */ }
+  if (!res.ok || !json) {
+    const detail = json ? (json.errors?.[0]?.message || json.errors?.[0] || JSON.stringify(json).slice(0, 200)) : "";
     throw new Error(`HTTP ${res.status}${detail ? " " + detail : ""}`);
   }
-  const json = await res.json();
-  if (json.errors?.length && !json.data) throw new Error(json.errors[0].message);
+  if (json.errors?.length && !json.data) throw new Error(json.errors[0].message || String(json.errors[0]));
   return json.data;
+}
+
+async function gql(query, variables) {
+  // 1) GET with the query in the URL: no request body and no CORS preflight.
+  try {
+    const url = `${ENDPOINT}?query=${encodeURIComponent(inlineQuery(query, variables).replace(/\s+/g, " ").trim())}`;
+    return await readResponse(await fetch(url));
+  } catch (getError) {
+    // 2) Fall back to a normal JSON POST.
+    try {
+      return await readResponse(await fetch(ENDPOINT, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ query, variables }),
+      }));
+    } catch (postError) {
+      throw new Error(`${getError.message} | POST: ${postError.message}`);
+    }
+  }
 }
 
 async function gqlRetry(query, variables, tries = 3) {
