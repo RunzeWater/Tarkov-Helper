@@ -66,7 +66,11 @@ async function gql(query, variables) {
     headers: { "Content-Type": "application/json", Accept: "application/json" },
     body: JSON.stringify({ query, variables }),
   });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) {
+    let detail = "";
+    try { const j = await res.json(); detail = j.errors?.[0]?.message || JSON.stringify(j).slice(0, 200); } catch { /* no body */ }
+    throw new Error(`HTTP ${res.status}${detail ? " " + detail : ""}`);
+   }
   const json = await res.json();
   if (json.errors?.length && !json.data) throw new Error(json.errors[0].message);
   return json.data;
