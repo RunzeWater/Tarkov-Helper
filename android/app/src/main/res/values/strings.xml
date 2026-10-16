@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">塔科夫助手</string>
+    <string name="title_activity_main">塔科夫助手</string>
+    <string name="package_name">dev.runze.tarkovhelper</string>
+    <string name="custom_url_scheme">dev.runze.tarkovhelper</string>
+</resources>
