@@ -6,8 +6,8 @@ const ZONE = `zones { map { normalizedName } position { x y z } outline { x z } 
 const KEYS = `requiredKeys { id name shortName }`;
 
 export const TASKS_QUERY = `
-query Tasks($lang: LanguageCode, $mode: GameMode) {
-  tasks(lang: $lang, gameMode: $mode) {
+query Tasks($lang: LanguageCode, $mode: GameMode, $limit: Int, $offset: Int) {
+  tasks(lang: $lang, gameMode: $mode, limit: $limit, offset: $offset) {
     id name normalizedName experience wikiLink minPlayerLevel
     kappaRequired lightkeeperRequired factionName
     trader { id name normalizedName imageLink }
@@ -29,6 +29,10 @@ query Tasks($lang: LanguageCode, $mode: GameMode) {
       traderStanding { trader { name } standing }
     }
   }
+}`;
+
+export const MAPS_QUERY = `
+query Maps($lang: LanguageCode, $mode: GameMode) {
   maps(lang: $lang, gameMode: $mode) {
     id name normalizedName raidDuration players
     extracts { id name faction position { x y z } }
@@ -66,14 +70,37 @@ async function gql(query, variables) {
     headers: { "Content-Type": "application/json", Accept: "application/json" },
     body: JSON.stringify({ query, variables }),
   });
-    if (!res.ok) {
+  if (!res.ok) {
     let detail = "";
     try { const j = await res.json(); detail = j.errors?.[0]?.message || JSON.stringify(j).slice(0, 200); } catch { /* no body */ }
     throw new Error(`HTTP ${res.status}${detail ? " " + detail : ""}`);
-   }
+  }
   const json = await res.json();
   if (json.errors?.length && !json.data) throw new Error(json.errors[0].message);
   return json.data;
+}
+
+async function gqlRetry(query, variables, tries = 3) {
+  let last;
+  for (let i = 0; i < tries; i++) {
+    try { return await gql(query, variables); }
+    catch (e) { last = e; if (i < tries - 1) await new Promise((r) => setTimeout(r, 1200 * (i + 1))); }
+  }
+  throw last;
+}
+
+// Small requests are far less likely to time out on the server than one giant query.
+async function fetchGameData(lang, mode) {
+  const { maps } = await gqlRetry(MAPS_QUERY, { lang, mode });
+  const tasks = [];
+  const PAGE = 40;
+  for (let offset = 0; offset < 3000; offset += PAGE) {
+    const res = await gqlRetry(TASKS_QUERY, { lang, mode, limit: PAGE, offset });
+    const page = res.tasks || [];
+    tasks.push(...page);
+    if (page.length < PAGE) break;
+  }
+  return { tasks, maps };
 }
 
 // --- tiny IndexedDB key/value store ---
@@ -112,7 +139,7 @@ export async function loadGameData(lang, mode, force = false) {
   const cached = await cacheGet(key);
   if (cached && !force && Date.now() - cached.fetchedAt < MAX_AGE) return { ...cached, stale: false };
   try {
-    const data = await gql(TASKS_QUERY, { lang, mode });
+    const data = await fetchGameData(lang, mode);
     const entry = { data, fetchedAt: Date.now() };
     cacheSet(key, entry);
     return { ...entry, stale: false };
