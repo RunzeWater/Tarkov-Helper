@@ -15,7 +15,7 @@ const debounce = (fn, ms) => { let h; return (...a) => { clearTimeout(h); h = se
 const STORE_KEY = "tkh.v1";
 const DEFAULTS = {
   lang: "zh", mode: "regular", level: 1, faction: "USEC",
-  done: {}, objDone: {}, have: {},
+  done: {}, objDone: {}, have: {}, tracked: {},
   tab: "tasks",
   f: { q: "", trader: "", map: "", status: "available", kappa: false, lk: false },
   mapKey: "customs", mapScope: "available", mapExtracts: true, mapLayer: "sat", mapFloor: {},
@@ -211,7 +211,7 @@ async function backgroundRefresh() {
 }
 
 /* ---------- tasks ---------- */
-const STATUS_KEYS = [["available", "stAvailable"], ["locked", "stLocked"], ["done", "stDone"], ["all", "stAll"]];
+const STATUS_KEYS = [["tracked", "stTracked"], ["available", "stAvailable"], ["locked", "stLocked"], ["done", "stDone"], ["all", "stAll"]];
 
 function taskMatches(task, q) {
   if (!q) return true;
@@ -223,7 +223,8 @@ function filteredTasks() {
   return G.tasks.filter((task) => {
     const st = statusOf(task);
     if (st === "na") return false;
-    if (f.status !== "all" && st !== f.status) return false;
+    if (f.status === "tracked") { if (!S.tracked[task.id] || st === "done") return false; }
+    else if (f.status !== "all" && st !== f.status) return false;
     if (f.trader && task.trader.normalizedName !== f.trader) return false;
     if (f.map && !taskOnMap(task, f.map)) return false;
     if (f.kappa && !task.kappaRequired) return false;
@@ -266,9 +267,10 @@ function renderTaskList() {
   const list = filteredTasks();
   $("#task-count").textContent = t("nTasks", { n: list.length });
   const ul = $("#task-list");
-  if (!list.length) { ul.innerHTML = `<li class="empty">${esc(t("noTasks"))}</li>`; return; }
+  if (!list.length) { ul.innerHTML = `<li class="empty">${esc(t(S.f.status === "tracked" ? "noTracked" : "noTasks"))}</li>`; return; }
   ul.innerHTML = list.map((task) => {
     const st = statusOf(task);
+    const tracked = !!S.tracked[task.id];
     const [d, n] = objProgress(task);
     const maps = taskMapNames(task);
     return `<li class="task st-${st}">
@@ -282,7 +284,8 @@ function renderTaskList() {
           ${task.lightkeeperRequired ? `<span class="tag lk">${esc(t("lightkeeper"))}</span>` : ""}
           ${n ? `<span class="tag prog">${d}/${n}</span>` : ""}
         </span>
-      </button></li>`;
+      </button>
+      ${st !== "done" ? `<button class="track" data-act="toggle-track" data-id="${task.id}" aria-pressed="${tracked}">${esc(t(tracked ? "tracking" : "track"))}</button>` : ""}</li>`;
   }).join("");
 }
 
@@ -291,12 +294,13 @@ function setDone(id, value) {
   if (!task) return;
   if (value) {
     S.done[id] = true;
+    delete S.tracked[id];
     // Completing a quest implies its prerequisite chain is complete too.
     let added = 0;
     const walk = (tk) => {
       for (const r of tk.taskRequirements || []) {
         const p = r?.task && G.byId.get(r.task.id);
-        if (p && (r.status || []).includes("complete") && !S.done[p.id] && factionOk(p)) { S.done[p.id] = true; added++; walk(p); }
+        if (p && (r.status || []).includes("complete") && !S.done[p.id] && factionOk(p)) { S.done[p.id] = true; delete S.tracked[p.id]; added++; walk(p); }
       }
     };
     walk(task);
@@ -306,6 +310,40 @@ function setDone(id, value) {
     toast(t("undoneToast", { name: task.name }));
   }
   save();
+}
+
+function toggleTrack(id) {
+  const task = G.byId.get(id);
+  if (!task) return;
+  if (S.tracked[id]) {
+    delete S.tracked[id];
+    toast(t("untrackedToast", { name: task.name }));
+  } else {
+    S.tracked[id] = true;
+    if (Object.keys(S.tracked).length === 1) S.mapScope = "tracked"; // first pick: the map shows your list
+    toast(t("trackedToast", { name: task.name }));
+  }
+  save();
+}
+
+/* quest location photos from the quest's wiki page, loaded only when a detail panel opens */
+let photoToken = 0;
+function photosBlock(task) {
+  if (!task.wikiLink) return "";
+  return `<h3>${esc(t("locPhotos"))}</h3><div id="task-photos" class="gallery-wrap"><div class="gal-state"><div class="spinner sm" aria-hidden="true"></div><span>${esc(t("photosLoading"))}</span></div></div>`;
+}
+function loadTaskPhotos(task) {
+  if (!task.wikiLink || !$("#task-photos")) return;
+  const token = ++photoToken;
+  const show = (html) => { const box = $("#task-photos"); if (box && token === photoToken) box.innerHTML = html; };
+  api.wikiTaskImages(api.titleFromWikiUrl(task.wikiLink)).then((imgs) => {
+    if (!imgs.length) { show(`<p class="hint">${esc(t("photosNone"))}</p>`); return; }
+    show(`<div class="gallery">${imgs.map((im) => `<button class="gal-item" data-act="view-photo" data-src="${esc(api.wikiImage(im.src, 1600))}" data-cap="${esc(im.caption)}">
+        <img src="${esc(api.wikiImage(im.src, 560))}" alt="${esc(im.caption)}" referrerpolicy="no-referrer" loading="lazy" decoding="async">${im.caption ? `<span>${esc(im.caption)}</span>` : ""}</button>`).join("")}</div>
+      <p class="hint">${esc(t("photosSource"))}</p>`);
+    const box = $("#task-photos");
+    box?.querySelectorAll(".gal-item img").forEach((img) => img.addEventListener("error", () => img.closest(".gal-item")?.remove()));
+  }).catch(() => show(`<p class="hint">${esc(t("photosFail"))}</p>`));
 }
 
 function itemChip(item, count, extra = "") {
@@ -347,6 +385,7 @@ function openTask(id) {
       ${task.factionName && task.factionName !== "Any" ? `<span class="tag">${esc(task.factionName)}</span>` : ""}
     </div>
     <div class="actions">
+      ${st !== "done" ? `<button class="btn ${S.tracked[id] ? "" : "ghost"}" data-act="toggle-track-sheet" data-id="${id}">${esc(t(S.tracked[id] ? "untrack" : "trackBtn"))}</button>` : ""}
       <button class="btn ${st === "done" ? "ghost" : ""}" data-act="toggle-done-sheet" data-id="${id}">${esc(st === "done" ? t("markUndone") : t("markDone"))}</button>
       ${task.wikiLink ? `<a class="btn ghost" href="${esc(task.wikiLink)}" target="_blank" rel="noopener">${esc(t("wiki"))} ↗</a>` : ""}
     </div>
@@ -385,9 +424,12 @@ function openTask(id) {
       ${(rew.items || []).filter((r) => r?.item).map((r) => itemChip(r.item, r.count)).join("")}
     </div>
 
+    ${photosBlock(task)}
+
     ${unlocks.length ? `<h3>${esc(t("unlocks"))}</h3><div class="tlinks">${unlocks.map(taskLink).join("")}</div>` : ""}
   `;
   openSheet(html);
+  loadTaskPhotos(task);
 }
 
 /* ---------- sheet (bottom panel) with Android back-button support ---------- */
@@ -421,8 +463,13 @@ let pendingFocus = null;
 let pendingExtract = null;
 let SVGSTATE = null;
 let EXTRACT_MARKERS = new Map();
+let lmapKey = null;
+let lastView = null; // keep the user's zoom and position when the map is redrawn
 function destroyMap() {
-  if (LMAP) { LMAP.remove(); LMAP = null; }
+  if (LMAP) {
+    try { lastView = { c: LMAP.getCenter(), z: LMAP.getZoom(), key: lmapKey }; } catch { /* map not ready */ }
+    LMAP.remove(); LMAP = null;
+  }
   SVGSTATE = null;
   EXTRACT_MARKERS = new Map();
 }
@@ -451,6 +498,7 @@ const ICONS = {
   fsOn: "M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5",
   fsOff: "M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5",
   exits: "M14 4h5v16h-5M10 8l-4 4 4 4M6 12h10",
+  list: "M9 6h11M9 12h11M9 18h11M4 6l1 1 2-2M4 12l1 1 2-2M4 18l1 1 2-2",
 };
 const facKey = (f) => { f = (f || "").toLowerCase(); return f === "pmc" ? "pmc" : f === "scav" ? "scav" : "shared"; };
 
@@ -477,6 +525,7 @@ function renderMap() {
     <div class="map-bar">
       <select id="map-select" aria-label="${esc(t("mapPick"))}">${opts.map((o) => `<option value="${o.key}" ${o.key === S.mapKey ? "selected" : ""}>${esc(o.name)}</option>`).join("")}</select>
       <div class="seg sm" role="group">
+        <button data-act="map-scope" data-v="tracked" aria-pressed="${S.mapScope === "tracked"}">${esc(t("mapTracked"))}</button>
         <button data-act="map-scope" data-v="available" aria-pressed="${S.mapScope === "available"}">${esc(t("mapAvail"))}</button>
         <button data-act="map-scope" data-v="open" aria-pressed="${S.mapScope === "open"}">${esc(t("mapOpen"))}</button>
       </div>
@@ -486,6 +535,7 @@ function renderMap() {
     <div class="map-wrap"><div id="leaflet" class="leaflet-host"></div>
       <div class="map-ctrls">
         <button id="fs-btn" class="map-btn" data-act="map-fs" aria-label="${esc(t(mapFs ? "fsExit" : "fsEnter"))}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="${mapFs ? ICONS.fsOff : ICONS.fsOn}"/></svg></button>
+        <button class="map-btn" data-act="tracked-list" aria-label="${esc(t("trackedTitle"))}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="${ICONS.list}"/></svg></button>
         <button class="map-btn" data-act="extract-list" aria-label="${esc(t("exList"))}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="${ICONS.exits}"/></svg></button>
         <select id="floor-select" class="map-floor" aria-label="${esc(t("floor"))}" hidden></select>
       </div>
@@ -509,43 +559,58 @@ function buildLeaflet(cfg) {
     crs: makeCRS(cfg), minZoom: cfg.minZoom, maxZoom: cfg.maxZoom,
     zoomSnap: 0.5, zoomDelta: 0.5, attributionControl: false, maxBounds: bounds.pad(0.6), maxBoundsViscosity: 0.8,
   }));
+  lmapKey = S.mapKey;
   const useTiles = cfg.tilePath && (S.mapLayer === "sat" || !cfg.svgPath);
   if (useTiles) addTiles(cfg, bounds);
   else if (cfg.svgPath) addSvg(cfg, bounds, map);
-  map.fitBounds(bounds);
+  if (lastView && lastView.key === S.mapKey) map.setView(lastView.c, lastView.z, { animate: false });
+  else map.fitBounds(bounds);
 
   if (S.mapExtracts) addExtracts(map);
 
   const byObj = new Map();
   let count = 0;
+  const trackedScope = S.mapScope === "tracked";
   for (const task of G.tasks) {
     const st = statusOf(task);
     if (st === "na" || st === "done") continue;
     if (S.mapScope === "available" && st !== "available") continue;
+    if (trackedScope && !S.tracked[task.id]) continue;
     for (const o of task.objectives || []) {
       if (!o || S.objDone[o.id]) continue;
       const pts = objPoints(o).filter((p) => p.key === S.mapKey);
       if (!pts.length) continue;
       const color = objColor(o.type);
-      const popup = `<div class="pop"><p class="eyebrow">${esc(task.trader.name)}</p><b>${esc(task.name)}</b><p>${esc(o.description)}</p>
-        <button class="btn sm" data-act="open-task" data-id="${task.id}">${esc(t("viewTask"))}</button></div>`;
+      const open = () => openObjective(task.id, o.id);
       const layers = [];
-      for (const p of pts) {
+      pts.forEach((p, i) => {
         if (p.outline?.length > 2) {
-          layers.push(L.polygon(p.outline.map((q) => [q.z, q.x]), { color, weight: 1.5, fillOpacity: 0.18 }).bindPopup(popup).addTo(map));
+          layers.push(L.polygon(p.outline.map((q) => [q.z, q.x]), { color, weight: 1.5, fillOpacity: 0.18 }).on("click", open).addTo(map));
         }
-        layers.push(L.circleMarker([p.z, p.x], { radius: 7, color: "#17150f", weight: 2, fillColor: color, fillOpacity: 1 }).bindPopup(popup).addTo(map));
+        const cm = L.circleMarker([p.z, p.x], { radius: trackedScope ? 9 : 7, color: "#17150f", weight: 2, fillColor: color, fillOpacity: 1 }).on("click", open).addTo(map);
+        // your own picks are few, so name them on the map
+        if (trackedScope && i === 0) cm.bindTooltip(esc(task.name), { permanent: true, direction: "right", offset: [10, 0], className: "qlabel" });
+        layers.push(cm);
         count++;
-      }
+      });
       byObj.set(o.id, layers);
     }
   }
-  if (!count) { const n = $("#map-note"); n.hidden = false; n.textContent = t("mapNoMarkers"); }
+  if (!count) {
+    const n = $("#map-note");
+    n.hidden = false;
+    if (trackedScope && !Object.keys(S.tracked).length) n.innerHTML = `${esc(t("noTracked"))} <button class="link" data-act="goto-tasks">${esc(t("gotoTasks"))}</button>`;
+    else n.textContent = t(trackedScope ? "mapTrackedNone" : "mapNoMarkers");
+  }
 
   if (pendingFocus) {
     const layers = byObj.get(pendingFocus) || [];
     const mk = layers.find((l) => l instanceof L.CircleMarker);
-    if (mk) { map.setView(mk.getLatLng(), Math.min(cfg.maxZoom, cfg.minZoom + 2)); setTimeout(() => mk.openPopup(), 150); }
+    if (mk) {
+      map.setView(mk.getLatLng(), Math.min(cfg.maxZoom, cfg.minZoom + 2));
+      const ring = L.marker(mk.getLatLng(), { icon: L.divIcon({ className: "pulse", iconSize: [44, 44] }), interactive: false, keyboard: false }).addTo(map);
+      setTimeout(() => { if (LMAP === map) map.removeLayer(ring); }, 3600);
+    }
     pendingFocus = null;
   }
   if (pendingExtract) {
@@ -743,6 +808,59 @@ function focusExtract(kind, id) {
   if (el) { el.classList.remove("flash"); void el.offsetWidth; el.classList.add("flash"); }
 }
 
+/* ---------- quest objectives on the map ---------- */
+const OBJ_TYPES = { visit: "otVisit", mark: "otMark", plantItem: "otPlant", plantQuestItem: "otPlant", findQuestItem: "otFindQuest", giveQuestItem: "otGiveQuest",
+  shoot: "otShoot", extract: "otExtract", giveItem: "otGive", findItem: "otFind", useItem: "otUse" };
+const objTypeName = (type) => t(OBJ_TYPES[type] || "otOther");
+
+function openObjective(taskId, objId) {
+  const task = G.byId.get(taskId);
+  const o = task?.objectives.find((x) => x?.id === objId);
+  if (!o) return;
+  if (LMAP) LMAP.closePopup();
+  const done = !!S.objDone[objId];
+  const items = (o.items || []).filter(Boolean);
+  const keys = (o.requiredKeys || []).flat().filter(Boolean);
+  openSheet(`
+    <div class="sheet-head">
+      <div><p class="eyebrow">${esc(task.trader.name)}${task.map ? ` · ${esc(task.map.name)}` : ""}</p><h2>${esc(task.name)}</h2></div>
+      <button class="icon-btn" data-act="close-sheet" aria-label="${esc(t("close"))}"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+    </div>
+    <div class="obj-card">
+      <p class="obj-type"><i style="background:${objColor(o.type)}"></i>${esc(objTypeName(o.type))}</p>
+      <p class="obj-desc">${esc(o.description)}</p>
+      ${items.length || o.questItem || o.markerItem ? `<div class="ichips">
+        ${items.slice(0, 6).map((it, i) => itemChip(it, i === 0 ? o.count : 0, i === 0 && o.foundInRaid ? `<em class="fir">FIR</em>` : "")).join("")}
+        ${o.questItem ? `<span class="ichip quest">${o.questItem.iconLink ? `<img src="${esc(o.questItem.iconLink)}" alt="" loading="lazy">` : ""}<span>${esc(o.questItem.name)}</span></span>` : ""}
+        ${o.markerItem ? itemChip(o.markerItem, 0) : ""}</div>` : ""}
+      ${keys.length ? `<p class="keys"><span>${esc(t("keys"))}</span> ${keys.map((k) => itemChip(k, 0)).join("")}</p>` : ""}
+    </div>
+    <div class="actions">
+      <button class="btn ${done ? "ghost" : ""}" data-act="obj-done" data-task="${taskId}" data-id="${objId}">${esc(t(done ? "objUndone" : "objDone"))}</button>
+      <button class="btn ghost" data-act="open-task" data-id="${taskId}">${esc(t("viewTask"))}</button>
+    </div>
+    ${photosBlock(task)}`);
+  loadTaskPhotos(task);
+}
+
+function openTrackedList() {
+  const list = G.tasks.filter((x) => S.tracked[x.id] && statusOf(x) !== "done");
+  const objRow = (task, o) => {
+    const pts = objPoints(o);
+    const here = pts.some((p) => p.key === S.mapKey);
+    const other = !here && pts[0] ? pts[0].key : null;
+    const btn = here || other ? `<button class="chip sm" data-act="obj-locate" data-task="${task.id}" data-id="${o.id}">${esc(here ? t("locate") : mapNameFor(other))}</button>` : "";
+    return `<li><span class="dot" style="background:${objColor(o.type)}"></span><span class="trk-desc">${esc(o.description)}</span>${btn}</li>`;
+  };
+  openSheet(`
+    <div class="sheet-head"><div><p class="eyebrow">${esc(mapNameFor(S.mapKey))}</p><h2>${esc(t("trackedTitle"))}</h2></div>
+      <button class="icon-btn" data-act="close-sheet" aria-label="${esc(t("close"))}"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
+    ${list.length ? list.map((task) => `<div class="trk">
+        <button class="trk-name" data-act="open-task" data-id="${task.id}"><span>${esc(task.name)}</span><small>${esc(task.trader.name)}</small></button>
+        <ul class="trk-objs">${task.objectives.filter((o) => o && !S.objDone[o.id]).map((o) => objRow(task, o)).join("")}</ul></div>`).join("")
+      : `<p class="plain muted">${esc(t("noTracked"))}</p><div class="actions"><button class="btn" data-act="goto-tasks">${esc(t("gotoTasks"))}</button></div>`}`);
+}
+
 /* ---------- full-screen map ---------- */
 // Capacitor's WebView ignores the browser Fullscreen API, so the map simply covers the whole app.
 let mapFs = false;
@@ -807,7 +925,9 @@ function showOnMap(taskId, objId) {
   if (!p) return;
   // make sure the marker will be drawn even if the objective was ticked or the quest is locked
   if (S.objDone[objId]) { delete S.objDone[objId]; }
-  if (statusOf(task) !== "available") S.mapScope = "open";
+  const st = statusOf(task);
+  const hidden = S.mapScope === "tracked" ? !S.tracked[taskId] : S.mapScope === "available" && st !== "available";
+  if (hidden) S.mapScope = "open";
   S.mapKey = p.key; pendingFocus = objId; save();
   if (sheetOpen) closeSheet();
   setTab("map");
@@ -1002,6 +1122,15 @@ document.addEventListener("click", async (e) => {
     case "lk": S.f.lk = !S.f.lk; save(); renderTasks(); break;
     case "open-task": if (LMAP) LMAP.closePopup(); openTask(id); break;
     case "toggle-done": setDone(id, !S.done[id]); renderTaskList(); break;
+    case "toggle-track": toggleTrack(id); renderTaskList(); break;
+    case "toggle-track-sheet": toggleTrack(id); openTask(id); refreshUnderlying(); break;
+    case "tracked-list": openTrackedList(); break;
+    case "obj-locate": showOnMap(el.dataset.task, id); break;
+    case "obj-done": {
+      if (S.objDone[id]) delete S.objDone[id]; else S.objDone[id] = true;
+      save(); openObjective(el.dataset.task, id); refreshUnderlying(); break;
+    }
+    case "goto-tasks": if (sheetOpen) closeSheet(); S.f.status = Object.keys(S.tracked).length ? "tracked" : "available"; save(); setTab("tasks"); break;
     case "toggle-done-sheet": setDone(id, !S.done[id]); openTask(id); refreshUnderlying(); break;
     case "toggle-obj": {
       if (S.objDone[id]) delete S.objDone[id]; else S.objDone[id] = true;

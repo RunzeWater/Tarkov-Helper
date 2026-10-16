@@ -36,7 +36,7 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 input, select, textarea { font: inherit; color: var(--fg); }
 a { color: var(--accent); }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+button > svg, .search > svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 
 #app { display: flex; flex-direction: column; height: 100dvh; height: 100%; }
 
@@ -305,3 +305,37 @@ body.map-fs .map-note { top: calc(12px + env(safe-area-inset-top, 0px)); }
   padding: 24px max(16px, env(safe-area-inset-right, 0px)) calc(14px + env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px));
   background: linear-gradient(transparent, rgb(0 0 0 / .75)); }
 .viewer-close { position: absolute; z-index: 600; top: calc(12px + env(safe-area-inset-top, 0px)); right: max(12px, env(safe-area-inset-right, 0px)); background: rgb(0 0 0 / .6); color: #fff; width: 42px; height: 42px; }
+
+/* "to do" toggle on quest rows */
+.track { flex: none; align-self: center; border: 1px solid var(--line); border-radius: 999px; padding: 7px 10px; font: 600 13px/1 var(--display); letter-spacing: .03em; color: var(--muted); white-space: nowrap; background: var(--bg); }
+.track[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+
+/* quest names next to markers in the To do view */
+.leaflet-tooltip.qlabel { background: rgb(23 21 15 / .88); color: var(--fg); border: 1px solid var(--line); box-shadow: 0 1px 3px rgb(0 0 0 / .5); font: 600 12px/1.25 var(--body); padding: 3px 6px; border-radius: 3px; white-space: nowrap; }
+.leaflet-tooltip.qlabel::before { display: none; }
+.pulse { border: 3px solid #fff; border-radius: 50%; box-sizing: border-box; animation: pulse 1.2s ease-out 3; pointer-events: none; }
+@keyframes pulse { 0% { transform: scale(.4); opacity: 1; } 100% { transform: scale(1.6); opacity: 0; } }
+.map-note .link { margin-left: 4px; }
+
+/* objective panel */
+.obj-card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); padding: 12px; display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
+.obj-type { margin: 0; display: flex; align-items: center; gap: 6px; font: 600 13px/1 var(--display); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.obj-type i { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+.obj-desc { margin: 0; font-size: 16px; line-height: 1.45; }
+
+/* location photo strip */
+.gallery { display: flex; gap: 8px; overflow-x: auto; scroll-snap-type: x mandatory; padding-bottom: 6px; -webkit-overflow-scrolling: touch; }
+.gal-item { flex: 0 0 80%; max-width: 380px; scroll-snap-align: start; display: flex; flex-direction: column; gap: 4px; text-align: left; }
+.gal-item img { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; border-radius: var(--r); background: #0e0d09; border: 1px solid var(--line); display: block; }
+.gal-item span { font-size: 12px; line-height: 1.35; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.gal-state { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 13px; padding: 6px 0; }
+
+/* my quests list on the map */
+.trk { background: var(--panel); border-radius: var(--r); padding: 10px 12px; margin-bottom: 8px; }
+.trk-name { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; width: 100%; text-align: left; font-weight: 600; }
+.trk-name small { color: var(--muted); font-weight: 400; font-size: 12px; white-space: nowrap; }
+.trk-objs { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.trk-objs li { display: flex; align-items: flex-start; gap: 8px; }
+.trk-objs .dot { margin-top: 6px; border-radius: 50%; }
+.trk-desc { flex: 1; min-width: 0; font-size: 14px; line-height: 1.4; }
+.chip.sm { padding: 5px 10px; font-size: 12px; flex: none; }

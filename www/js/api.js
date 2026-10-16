@@ -385,6 +385,72 @@ async function loadWikiExtracts(title) {
   }
 }
 
+/* ---------- quest location photos from the quest's wiki page ---------- */
+export function titleFromWikiUrl(url) {
+  if (!url) return null;
+  try {
+    const part = new URL(url).pathname.split("/wiki/")[1];
+    return part ? decodeURIComponent(part).replace(/_/g, " ") : null;
+  } catch { return null; }
+}
+
+// Content images (screenshots, annotated maps) with their captions; skips icons and infoboxes.
+export function parseWikiImages(html) {
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  doc.querySelectorAll("br").forEach((br) => br.replaceWith(" "));
+  doc.querySelectorAll(".portable-infobox, aside, .navbox, .toc, .mw-editsection").forEach((el) => el.remove());
+  const seen = new Set();
+  const out = [];
+  for (const img of doc.querySelectorAll("img")) {
+    const src = img.getAttribute("data-src") || img.getAttribute("src") || "";
+    if (!/^https?:\/\/static\.wikia\.nocookie\.net\//.test(src)) continue;
+    const w = parseInt(img.getAttribute("width") || "0", 10);
+    const h = parseInt(img.getAttribute("height") || "0", 10);
+    if ((w && w < 100) || (h && h < 60)) continue; // item icons, flags, bullets
+    const key = src.replace(/\/revision\/.*$/, "");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const capEl = img.closest("figure")?.querySelector("figcaption")
+      || img.closest(".wikia-gallery-item")?.querySelector(".lightbox-caption")
+      || img.closest(".gallerybox")?.querySelector(".gallerytext")
+      || img.closest(".thumb")?.querySelector(".thumbcaption");
+    let caption = capEl ? capEl.textContent.replace(/\s+/g, " ").trim() : "";
+    if (!caption) {
+      const name = img.getAttribute("data-image-name") || img.getAttribute("alt") || "";
+      caption = name.replace(/\.(png|jpe?g|webp|gif)$/i, "").replace(/_/g, " ").trim();
+    }
+    out.push({ src, caption });
+    if (out.length >= 16) break;
+  }
+  return out;
+}
+
+const imgPending = new Map();
+export function wikiTaskImages(title) {
+  if (!title) return Promise.resolve([]);
+  if (!imgPending.has(title)) imgPending.set(title, loadWikiTaskImages(title).finally(() => imgPending.delete(title)));
+  return imgPending.get(title);
+}
+async function loadWikiTaskImages(title) {
+  const key = `wikiimg:v1:${title}`;
+  const cached = await cacheGet(key);
+  if (cached && Date.now() - cached.fetchedAt < WIKI_MAX_AGE) return cached.images;
+  try {
+    const sec = await wikiJson({ action: "parse", page: title, prop: "sections" });
+    // Quest pages explain where to go in a "Guide" section; fall back to the whole page.
+    const guide = (sec.parse?.sections || []).find((s) => /^\d+$/.test(s.index) && /^(guide|walkthrough|location)/i.test(s.line.trim()));
+    const params = { action: "parse", page: title, prop: "text", disablelimitreport: "1" };
+    if (guide) params.section = guide.index;
+    const j = await wikiJson(params);
+    const images = parseWikiImages(j.parse?.text?.["*"] || "");
+    await cacheSet(key, { images, fetchedAt: Date.now() });
+    return images;
+  } catch (e) {
+    if (cached) return cached.images;
+    throw e;
+  }
+}
+
 const normName = (s) => (s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
 export function matchWiki(rows, entry, kind) {
   const n = normName(entry.nameEn || entry.name);
