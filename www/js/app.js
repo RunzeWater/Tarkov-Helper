@@ -18,7 +18,7 @@ const DEFAULTS = {
   done: {}, objDone: {}, have: {},
   tab: "tasks",
   f: { q: "", trader: "", map: "", status: "available", kappa: false, lk: false },
-  mapKey: "customs", mapScope: "available", mapExtracts: true, mapLayer: "sat",
+  mapKey: "customs", mapScope: "available", mapExtracts: true, mapLayer: "sat", mapFloor: {},
   itemScope: "open", itemFir: false,
 };
 let S = structuredClone(DEFAULTS);
@@ -124,6 +124,8 @@ function renderShell() {
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="${d}"/></svg><span>${esc(t(key))}</span></button>`).join("")}
     </nav>
     <div id="sheet" class="sheet" hidden><div class="sheet-backdrop" data-act="close-sheet"></div><section class="sheet-panel" role="dialog" aria-modal="true"><div class="sheet-grip"></div><div id="sheet-body"></div></section></div>
+    <div id="viewer" class="viewer" hidden><div id="viewer-map" class="viewer-map"></div><p id="viewer-cap" class="viewer-cap"></p>
+      <button class="icon-btn viewer-close" data-act="viewer-close" aria-label="${esc(t("close"))}"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>`;
   renderDataline();
 }
@@ -148,6 +150,7 @@ function toast(msg) {
 
 function renderView() {
   destroyMap();
+  if (mapFs && S.tab !== "map") exitFullscreenUI();
   const v = $("#view");
   v.className = "view view-" + S.tab;
   if (!G.ready && S.tab !== "settings") { v.innerHTML = loadingHTML(); return; }
@@ -309,7 +312,7 @@ function itemChip(item, count, extra = "") {
   if (!item) return "";
   return `<button class="ichip" data-act="open-item" data-id="${esc(item.id)}">
     ${item.iconLink ? `<img src="${esc(item.iconLink)}" alt="" loading="lazy">` : ""}
-    <span>${esc(item.shortName || item.name)}</span>${count ? `<b>×${count}</b>` : ""}${extra}</button>`;
+    <span>${esc(item.shortName || item.name)}</span>${count ? `<b>×${count >= 1000 ? fmtNum(count) : count}</b>` : ""}${extra}</button>`;
 }
 function taskLink(id) {
   const x = G.byId.get(id);
@@ -406,12 +409,23 @@ function hideSheet() {
   setTimeout(() => { if (!sheetOpen) sheet.hidden = true; }, 220);
 }
 function closeSheet() { if (sheetOpen) history.back(); }
-window.addEventListener("popstate", () => { if (sheetOpen) hideSheet(); });
+window.addEventListener("popstate", () => {
+  if (viewerOpen) { hideViewer(); return; }
+  if (sheetOpen) { hideSheet(); return; }
+  if (mapFs) exitFullscreenUI();
+});
 
 /* ---------- map ---------- */
 let LMAP = null;
 let pendingFocus = null;
-function destroyMap() { if (LMAP) { LMAP.remove(); LMAP = null; } }
+let pendingExtract = null;
+let SVGSTATE = null;
+let EXTRACT_MARKERS = new Map();
+function destroyMap() {
+  if (LMAP) { LMAP.remove(); LMAP = null; }
+  SVGSTATE = null;
+  EXTRACT_MARKERS = new Map();
+}
 
 function rotate(latLng, deg) {
   if (!latLng.lng && !latLng.lat) return L.latLng(0, 0);
@@ -433,6 +447,12 @@ function makeCRS(cfg) {
 const toBounds = (b) => L.latLngBounds([b[0][1], b[0][0]], [b[1][1], b[1][0]]);
 const OBJ_COLORS = { visit: "#6fb0d9", mark: "#e0a43c", plantItem: "#e0a43c", plantQuestItem: "#e0a43c", findQuestItem: "#c97be0", giveQuestItem: "#c97be0", shoot: "#d9604a", extract: "#7fbf6a" };
 const objColor = (type) => OBJ_COLORS[type] || "#d8c38f";
+const ICONS = {
+  fsOn: "M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5",
+  fsOff: "M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5",
+  exits: "M14 4h5v16h-5M10 8l-4 4 4 4M6 12h10",
+};
+const facKey = (f) => { f = (f || "").toLowerCase(); return f === "pmc" ? "pmc" : f === "scav" ? "scav" : "shared"; };
 
 function mapOptions() {
   const seen = new Set(), out = [];
@@ -442,6 +462,10 @@ function mapOptions() {
     seen.add(k); out.push({ key: k, name: m.name });
   }
   return out;
+}
+// the map record for a config key; prefer the exact match (factory over night-factory)
+function currentMapData(key = S.mapKey) {
+  return G.maps.find((x) => x.normalizedName === key) || G.maps.find((x) => cfgKeyFor(x.normalizedName) === key);
 }
 
 function renderMap() {
@@ -459,13 +483,19 @@ function renderMap() {
       <button class="chip" data-act="map-extracts" aria-pressed="${S.mapExtracts}">${esc(t("mapExtracts"))}</button>
       ${both ? `<button class="chip" data-act="map-layer">${esc(S.mapLayer === "sat" ? t("layerAbs") : t("layerSat"))}</button>` : ""}
     </div>
-    <div class="map-wrap"><div id="leaflet" class="leaflet-host"></div><div id="map-note" class="map-note" hidden></div>
+    <div class="map-wrap"><div id="leaflet" class="leaflet-host"></div>
+      <div class="map-ctrls">
+        <button id="fs-btn" class="map-btn" data-act="map-fs" aria-label="${esc(t(mapFs ? "fsExit" : "fsEnter"))}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="${mapFs ? ICONS.fsOff : ICONS.fsOn}"/></svg></button>
+        <button class="map-btn" data-act="extract-list" aria-label="${esc(t("exList"))}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="${ICONS.exits}"/></svg></button>
+        <select id="floor-select" class="map-floor" aria-label="${esc(t("floor"))}" hidden></select>
+      </div>
+      <div id="map-note" class="map-note" hidden></div>
       <div class="legend">
-        <span><i style="background:${objColor("visit")}"></i>${getLang() === "zh" ? "到达" : "Visit"}</span>
-        <span><i style="background:${objColor("mark")}"></i>${getLang() === "zh" ? "标记/放置" : "Mark/Plant"}</span>
-        <span><i style="background:${objColor("findQuestItem")}"></i>${getLang() === "zh" ? "任务物品" : "Quest item"}</span>
-        <span><i style="background:${objColor("shoot")}"></i>${getLang() === "zh" ? "击杀" : "Kill"}</span>
-        <span><i class="sq"></i>${esc(t("mapExtracts"))}</span>
+        <span><i style="background:${objColor("visit")}"></i>${esc(t("lgVisit"))}</span>
+        <span><i style="background:${objColor("mark")}"></i>${esc(t("lgMark"))}</span>
+        <span><i style="background:${objColor("findQuestItem")}"></i>${esc(t("lgQuestItem"))}</span>
+        <span><i style="background:${objColor("shoot")}"></i>${esc(t("lgKill"))}</span>
+        ${S.mapExtracts ? `<span><i class="sq"></i>${esc(t("mapExtracts"))}</span><span><i class="sq tr"></i>${esc(t("fac_transit"))}</span><span class="lg-hint">${esc(t("lgTap"))}</span>` : ""}
       </div></div>`;
   $("#map-select").addEventListener("change", (e) => { S.mapKey = e.target.value; save(); renderView(); });
   if (!cfg || !window.L) { const n = $("#map-note"); n.hidden = false; n.textContent = t("mapNotSupported"); return; }
@@ -474,30 +504,17 @@ function renderMap() {
 
 function buildLeaflet(cfg) {
   const bounds = toBounds(cfg.bounds);
-  LMAP = L.map("leaflet", {
-    crs: makeCRS(cfg), minZoom: cfg.minZoom, maxZoom: cfg.maxZoom + 1,
-    zoomSnap: 0.25, zoomDelta: 0.5, attributionControl: false, maxBounds: bounds.pad(0.6), maxBoundsViscosity: 0.8,
-  });
+  // zoomSnap 0.5: at half steps Leaflet uses the next tile level and scales it down, so tiles stay sharp
+  const map = (LMAP = L.map("leaflet", {
+    crs: makeCRS(cfg), minZoom: cfg.minZoom, maxZoom: cfg.maxZoom,
+    zoomSnap: 0.5, zoomDelta: 0.5, attributionControl: false, maxBounds: bounds.pad(0.6), maxBoundsViscosity: 0.8,
+  }));
   const useTiles = cfg.tilePath && (S.mapLayer === "sat" || !cfg.svgPath);
-  if (useTiles) {
-    L.tileLayer(cfg.tilePath, { tileSize: cfg.tileSize || 256, bounds, maxNativeZoom: cfg.maxZoom, maxZoom: cfg.maxZoom + 1 }).addTo(LMAP);
-  } else if (cfg.svgPath) {
-    L.imageOverlay(cfg.svgPath, cfg.svgBounds ? toBounds(cfg.svgBounds) : bounds, { className: "svg-base" }).addTo(LMAP);
-  }
-  LMAP.fitBounds(bounds);
+  if (useTiles) addTiles(cfg, bounds);
+  else if (cfg.svgPath) addSvg(cfg, bounds, map);
+  map.fitBounds(bounds);
 
-  if (S.mapExtracts) {
-    const m = G.maps.filter((x) => cfgKeyFor(x.normalizedName) === S.mapKey)[0];
-    for (const ex of m?.extracts || []) {
-      if (!ex?.position) continue;
-      const fac = (ex.faction || "").toLowerCase();
-      const cls = fac === "scav" ? "scav" : fac === "pmc" ? "pmc" : "shared";
-      L.marker([ex.position.z, ex.position.x], {
-        icon: L.divIcon({ className: `exfil ${cls}`, html: `<span>${esc(ex.name)}</span>`, iconSize: null }),
-        keyboard: false,
-      }).addTo(LMAP);
-    }
-  }
+  if (S.mapExtracts) addExtracts(map);
 
   const byObj = new Map();
   let count = 0;
@@ -515,9 +532,9 @@ function buildLeaflet(cfg) {
       const layers = [];
       for (const p of pts) {
         if (p.outline?.length > 2) {
-          layers.push(L.polygon(p.outline.map((q) => [q.z, q.x]), { color, weight: 1.5, fillOpacity: 0.18 }).bindPopup(popup).addTo(LMAP));
+          layers.push(L.polygon(p.outline.map((q) => [q.z, q.x]), { color, weight: 1.5, fillOpacity: 0.18 }).bindPopup(popup).addTo(map));
         }
-        layers.push(L.circleMarker([p.z, p.x], { radius: 7, color: "#17150f", weight: 2, fillColor: color, fillOpacity: 1 }).bindPopup(popup).addTo(LMAP));
+        layers.push(L.circleMarker([p.z, p.x], { radius: 7, color: "#17150f", weight: 2, fillColor: color, fillOpacity: 1 }).bindPopup(popup).addTo(map));
         count++;
       }
       byObj.set(o.id, layers);
@@ -528,9 +545,259 @@ function buildLeaflet(cfg) {
   if (pendingFocus) {
     const layers = byObj.get(pendingFocus) || [];
     const mk = layers.find((l) => l instanceof L.CircleMarker);
-    if (mk) { LMAP.setView(mk.getLatLng(), Math.min(cfg.maxZoom, cfg.minZoom + 2)); setTimeout(() => mk.openPopup(), 150); }
+    if (mk) { map.setView(mk.getLatLng(), Math.min(cfg.maxZoom, cfg.minZoom + 2)); setTimeout(() => mk.openPopup(), 150); }
     pendingFocus = null;
   }
+  if (pendingExtract) {
+    const { kind, id } = pendingExtract;
+    pendingExtract = null;
+    setTimeout(() => focusExtract(kind, id), 100);
+  }
+}
+
+// High-density screens get tiles from one zoom level deeper drawn at half size (what Leaflet's
+// detectRetina does), capped so we never ask for tiles beyond the deepest level that exists.
+function addTiles(cfg, bounds) {
+  const ts = cfg.tileSize || 256;
+  const retina = (window.devicePixelRatio || 1) >= 1.5 && cfg.maxZoom > cfg.minZoom;
+  L.tileLayer(cfg.tilePath, retina
+    ? { tileSize: ts / 2, zoomOffset: 1, bounds, maxNativeZoom: cfg.maxZoom - 1, maxZoom: cfg.maxZoom }
+    : { tileSize: ts, bounds, maxNativeZoom: cfg.maxZoom, maxZoom: cfg.maxZoom }).addTo(LMAP);
+}
+
+/* The abstract maps are SVGs with one group per floor. Drawn as an <img> every floor shows at
+   once; inlined, we can show the ground floor and let the user switch floors. */
+const svgCache = new Map();
+function scopeCss(css, scope) {
+  return css.replace(/([^{}]+)\{/g, (m, sel) => {
+    const x = sel.trim();
+    if (!x || x.startsWith("@") || /^(from|to|\d+%)$/.test(x)) return m;
+    return x.split(",").map((part) => `${scope} ${part.trim()}`).join(", ") + " {";
+  });
+}
+async function addSvg(cfg, bounds, map) {
+  const b = cfg.svgBounds ? toBounds(cfg.svgBounds) : bounds;
+  let text = svgCache.get(cfg.svgPath);
+  if (!text) {
+    try {
+      const r = await fetch(cfg.svgPath);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      text = await r.text();
+      if (!/<svg[\s>]/i.test(text)) throw new Error("not svg");
+      svgCache.set(cfg.svgPath, text);
+    } catch { text = null; }
+  }
+  if (map !== LMAP) return; // the user already switched maps
+  const fallback = () => L.imageOverlay(cfg.svgPath, b, { className: "svg-base" }).addTo(map).bringToBack();
+  if (!text) { fallback(); return; }
+  const el = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  el.innerHTML = text;
+  const inner = el.querySelector("svg");
+  if (!inner) { fallback(); return; }
+  el.setAttribute("viewBox", inner.getAttribute("viewBox") || "");
+  el.classList.add("tkh-svg");
+  for (const st of el.querySelectorAll("style")) st.textContent = scopeCss(st.textContent, ".tkh-svg");
+  const groups = [...inner.children].filter((c) => c.nodeName.toLowerCase() === "g" && c.id);
+  const base = cfg.svgLayer || (groups[0] && groups[0].id);
+  const withBase = (g) => g.id === base || g.dataset.keepWithGroup === base;
+  const levels = groups.filter((g) => !withBase(g) && !g.dataset.keepWithGroup);
+  L.svgOverlay(el, b, { interactive: false }).addTo(map).bringToBack();
+  SVGSTATE = { groups, base, withBase, levels };
+  applyFloor();
+  const sel = $("#floor-select");
+  if (sel && levels.length) {
+    const cur = S.mapFloor[S.mapKey] || "";
+    sel.innerHTML = [`<option value="">${esc(floorName(base))}</option>`, ...levels.map((g) => `<option value="${esc(g.id)}" ${g.id === cur ? "selected" : ""}>${esc(floorName(g.id))}</option>`)].join("");
+    sel.hidden = false;
+    sel.onchange = (e) => { S.mapFloor[S.mapKey] = e.target.value; save(); applyFloor(); };
+  }
+}
+function applyFloor() {
+  if (!SVGSTATE) return;
+  const want = S.mapFloor[S.mapKey] || "";
+  const active = SVGSTATE.levels.some((g) => g.id === want) ? want : "";
+  for (const g of SVGSTATE.groups) {
+    if (SVGSTATE.withBase(g)) { g.style.display = ""; g.style.opacity = active ? "0.3" : ""; }
+    else g.style.display = active && (g.id === active || g.dataset.keepWithGroup === active) ? "" : "none";
+  }
+}
+const FLOOR_ZH = { Ground_Level: "地面", Ground_Floor: "地面", Underground_Level: "地下", Underground: "地下", Basement: "地下室", Basement_Level: "地下室",
+  First_Floor: "一楼", Second_Floor: "二楼", Third_Floor: "三楼", Fourth_Floor: "四楼", Fifth_Floor: "五楼", Roof: "屋顶", Rooftop: "屋顶", Rooftops: "屋顶",
+  Tunnels: "隧道", Bunker: "地堡", Bunkers: "地堡" };
+const floorName = (id) => (getLang() === "zh" && FLOOR_ZH[id]) || String(id || "").replace(/_/g, " ");
+
+/* ---------- extracts ---------- */
+function addExtracts(map) {
+  const m = currentMapData();
+  if (!m) return;
+  const add = (e, kind) => {
+    if (!e?.position) return;
+    const cls = kind === "transit" ? "transit" : facKey(e.faction);
+    const mk = L.marker([e.position.z, e.position.x], {
+      icon: L.divIcon({ className: `exfil ${cls}`, html: `<span>${esc(e.name)}</span>`, iconSize: null }),
+      keyboard: false, riseOnHover: true,
+    }).addTo(map);
+    mk.on("click", () => openExtract(kind, e.id));
+    EXTRACT_MARKERS.set(`${kind}:${e.id}`, mk);
+  };
+  for (const e of m.extracts || []) add(e, "extract");
+  for (const x of m.transits || []) add(x, "transit");
+}
+
+function findExtract(m, kind, id) {
+  return ((kind === "transit" ? m.transits : m.extracts) || []).find((x) => String(x.id) === String(id));
+}
+
+let exToken = 0;
+function openExtract(kind, id, fromList = false) {
+  const m = currentMapData();
+  const e = m && findExtract(m, kind, id);
+  if (!e) return;
+  if (LMAP) LMAP.closePopup();
+  const fac = kind === "transit" ? "transit" : facKey(e.faction);
+  const title = api.wikiTitle(m);
+  const conds = [];
+  if (kind === "transit" && e.targetName) conds.push(`<li>${esc(t("exTransitTo", { map: e.targetName }))}</li>`);
+  if (e.switches?.length) conds.push(`<li><span>${esc(t("exSwitch"))}</span><b>${e.switches.map(esc).join(" / ")}</b></li>`);
+  if (e.transferItem) conds.push(`<li><span>${esc(t("exPay"))}</span>${itemChip(e.transferItem.item, e.transferItem.count)}</li>`);
+  openSheet(`
+    <div class="sheet-head">
+      <div><p class="eyebrow">${esc(m.name)} · <span class="fac fac-${fac}">${esc(t("fac_" + fac))}</span></p>
+        <h2>${esc(e.name)}</h2>${e.nameEn && e.nameEn !== e.name ? `<p class="sub-name">${esc(e.nameEn)}</p>` : ""}</div>
+      <button class="icon-btn" data-act="close-sheet" aria-label="${esc(t("close"))}"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+    </div>
+    <div id="ex-photo" class="ex-photo"><div class="spinner" aria-hidden="true"></div><span>${esc(t("exWikiLoading"))}</span></div>
+    <div id="ex-facts"></div>
+    ${conds.length ? `<h3>${esc(t("exConditions"))}</h3><ul class="conds">${conds.join("")}</ul>` : ""}
+    <div id="ex-wiki"></div>
+    <div class="actions">
+      ${fromList ? `<button class="btn" data-act="ex-locate" data-kind="${kind}" data-id="${esc(e.id)}">${esc(t("exLocate"))}</button>` : ""}
+      ${title ? `<a class="btn ghost" href="${esc(api.wikiPageUrl(title, kind === "transit" ? "Transits" : "Extractions"))}" target="_blank" rel="noopener">Wiki ↗</a>` : ""}
+    </div>`);
+  const token = ++exToken;
+  api.wikiExtracts(title)
+    .then((rows) => { if (token === exToken && sheetOpen) renderExtractWiki(api.matchWiki(rows, e, kind), e); })
+    .catch(() => { if (token === exToken && sheetOpen) renderExtractWiki(undefined, e); });
+}
+
+function renderExtractWiki(w, e) {
+  const photo = $("#ex-photo"), facts = $("#ex-facts"), box = $("#ex-wiki");
+  if (!photo) return;
+  const note = (key) => { photo.className = "ex-photo empty"; photo.innerHTML = `<span>${esc(t(key))}</span>`; };
+  if (w === undefined) { note("exWikiFail"); return; }
+  if (!w) { note("exWikiNone"); return; }
+  if (w.image) {
+    photo.className = "ex-photo";
+    photo.innerHTML = `<button class="ex-photo-btn" data-act="view-photo" data-src="${esc(api.wikiImage(w.image, 1600))}" data-cap="${esc(e.name)}">
+      <img src="${esc(api.wikiImage(w.image, 800))}" alt="${esc(e.name)}" referrerpolicy="no-referrer" decoding="async"><span class="zoom-hint">${esc(t("tapToEnlarge"))}</span></button>`;
+    photo.querySelector("img").addEventListener("error", () => note("imgFail"));
+  } else note("exNoPhoto");
+  const zhFaction = (s) => (getLang() === "zh" ? s.replace(/^All$/i, "全部") : s);
+  facts.innerHTML = `<div class="facts">
+    <div><span>${esc(t("exFaction"))}</span><b class="sm">${esc(zhFaction(w.faction) || "—")}</b></div>
+    <div><span>${esc(t("exAlways"))}</span><b class="sm">${esc(w.always || "—")}</b></div>
+    <div><span>${esc(t("exSingle"))}</span><b class="sm">${esc(w.single || "—")}</b></div></div>`;
+  const req = w.requirements && w.requirements !== "-" ? w.requirements : "";
+  box.innerHTML = req || w.notes ? `<h3>${esc(t("exWikiInfo"))}</h3>
+    ${req ? `<p class="wiki-line"><span>${esc(t("exReq"))}</span>${esc(req)}</p>` : ""}
+    ${w.notes ? `<p class="wiki-line"><span>${esc(t("exNotes"))}</span>${esc(w.notes)}</p>` : ""}
+    ${getLang() === "zh" ? `<p class="hint">${esc(t("exWikiEnglish"))}</p>` : ""}` : "";
+}
+
+function openExtractList() {
+  const m = currentMapData();
+  if (!m) return;
+  const ex = m.extracts || [];
+  const groups = [
+    ["pmc", ex.filter((e) => facKey(e.faction) === "pmc")],
+    ["shared", ex.filter((e) => facKey(e.faction) === "shared")],
+    ["scav", ex.filter((e) => facKey(e.faction) === "scav")],
+    ["transit", m.transits || []],
+  ].filter(([, list]) => list.length);
+  const badges = (e) => {
+    const b = [];
+    if (e.switches?.length) b.push(t("badgeSwitch"));
+    if (e.transferItem) b.push(t("badgePaid"));
+    return b.length ? `<small>${b.map(esc).join(" · ")}</small>` : "";
+  };
+  openSheet(`
+    <div class="sheet-head"><div><p class="eyebrow">${esc(m.name)}</p><h2>${esc(t("exList"))}</h2></div>
+      <button class="icon-btn" data-act="close-sheet" aria-label="${esc(t("close"))}"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
+    <p class="hint">${esc(t("exListHint"))}</p>
+    ${groups.length ? groups.map(([fac, list]) => `<h3>${esc(t("fac_" + fac))} · ${list.length}</h3><div class="ex-rows">${list.map((e) => `
+      <button class="ex-row" data-act="open-extract" data-kind="${fac === "transit" ? "transit" : "extract"}" data-id="${esc(e.id)}">
+        <span class="dot fac-${fac}"></span><span class="ex-row-name">${esc(e.name)}</span>${badges(e)}</button>`).join("")}</div>`).join("")
+      : `<p class="plain muted">${esc(t("none"))}</p>`}`);
+}
+
+function focusExtract(kind, id) {
+  if (!LMAP) return;
+  const mk = EXTRACT_MARKERS.get(`${kind}:${id}`);
+  if (!mk) {
+    if (!S.mapExtracts) { S.mapExtracts = true; save(); pendingExtract = { kind, id }; renderView(); }
+    return;
+  }
+  const cfg = MAP_CONFIG[S.mapKey];
+  LMAP.setView(mk.getLatLng(), Math.max(LMAP.getZoom(), Math.min(cfg.maxZoom, cfg.minZoom + 2)));
+  const el = mk.getElement();
+  if (el) { el.classList.remove("flash"); void el.offsetWidth; el.classList.add("flash"); }
+}
+
+/* ---------- full-screen map ---------- */
+// Capacitor's WebView ignores the browser Fullscreen API, so the map simply covers the whole app.
+let mapFs = false;
+function setFsButton() {
+  const b = $("#fs-btn");
+  if (!b) return;
+  b.setAttribute("aria-label", t(mapFs ? "fsExit" : "fsEnter"));
+  b.querySelector("path").setAttribute("d", mapFs ? ICONS.fsOff : ICONS.fsOn);
+}
+function enterFullscreen() {
+  if (mapFs) return;
+  mapFs = true;
+  document.body.classList.add("map-fs");
+  history.pushState({ fs: true }, "");
+  setFsButton();
+  setTimeout(() => LMAP && LMAP.invalidateSize(), 60);
+}
+function exitFullscreenUI() {
+  mapFs = false;
+  document.body.classList.remove("map-fs");
+  setFsButton();
+  setTimeout(() => LMAP && LMAP.invalidateSize(), 60);
+}
+
+/* ---------- photo viewer (pinch to zoom) ---------- */
+let VMAP = null;
+let viewerOpen = false;
+function openViewer(src, caption) {
+  if (!src) return;
+  const v = $("#viewer");
+  v.hidden = false;
+  $("#viewer-cap").textContent = caption || "";
+  if (!viewerOpen) { viewerOpen = true; history.pushState({ viewer: true }, ""); }
+  if (VMAP) { VMAP.remove(); VMAP = null; }
+  const img = new Image();
+  img.referrerPolicy = "no-referrer";
+  img.onload = () => {
+    if (!viewerOpen) return;
+    const w = img.naturalWidth, h = img.naturalHeight;
+    const b = L.latLngBounds([0, 0], [h, w]);
+    VMAP = L.map("viewer-map", { crs: L.CRS.Simple, zoomSnap: 0, attributionControl: false, zoomControl: false, maxBoundsViscosity: 1 });
+    L.imageOverlay(src, b).addTo(VMAP);
+    VMAP.fitBounds(b);
+    const z = VMAP.getZoom();
+    VMAP.setMinZoom(z);
+    VMAP.setMaxZoom(z + 3);
+    VMAP.setMaxBounds(b);
+  };
+  img.onerror = () => { toast(t("imgFail")); if (viewerOpen) history.back(); };
+  img.src = src;
+}
+function hideViewer() {
+  viewerOpen = false;
+  $("#viewer").hidden = true;
+  if (VMAP) { VMAP.remove(); VMAP = null; }
 }
 
 function showOnMap(taskId, objId) {
@@ -744,6 +1011,12 @@ document.addEventListener("click", async (e) => {
     case "map-scope": S.mapScope = v; save(); renderView(); break;
     case "map-extracts": S.mapExtracts = !S.mapExtracts; save(); renderView(); break;
     case "map-layer": S.mapLayer = S.mapLayer === "sat" ? "svg" : "sat"; save(); renderView(); break;
+    case "map-fs": if (mapFs) history.back(); else enterFullscreen(); break;
+    case "extract-list": openExtractList(); break;
+    case "open-extract": openExtract(el.dataset.kind, id, true); break;
+    case "ex-locate": { const kind = el.dataset.kind; closeSheet(); setTimeout(() => focusExtract(kind, id), 260); break; }
+    case "view-photo": openViewer(el.dataset.src, el.dataset.cap); break;
+    case "viewer-close": if (viewerOpen) history.back(); break;
     case "item-scope": S.itemScope = v; save(); renderItems(); break;
     case "item-fir": S.itemFir = !S.itemFir; save(); renderItems(); break;
     case "have": {

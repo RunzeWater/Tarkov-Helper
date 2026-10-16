@@ -4,7 +4,7 @@
 // in IndexedDB so the app opens instantly and still works offline.
 const BASE = "https://json.tarkov.dev/";
 export const MAX_AGE = 3 * 60 * 60 * 1000; // refresh in the background after 3 hours
-const CACHE_VERSION = 2;
+const CACHE_VERSION = 3;
 
 /* ---------- network ---------- */
 // Capacitor keeps the WebView's own fetch as CapacitorWebFetch. json.tarkov.dev allows
@@ -70,10 +70,26 @@ export function slimBundle(raw, lang) {
     id: x.id, name: tR(x.name), normalizedName: x.normalizedName, imageLink: x.imageLink || null,
   }));
 
-  const maps = Object.values(raw.maps?.maps || {}).filter((m) => m && m.id).map((m) => ({
-    id: m.id, name: tM(m.name), normalizedName: m.normalizedName, raidDuration: m.raidDuration ?? null, players: m.players ?? null,
-    extracts: (m.extracts || []).filter((e) => e && e.position).map((e) => ({ name: tM(e.name), faction: e.faction || "", position: xz(e.position) })),
-  }));
+  const tMEn = makeTr(raw.mapsEn, {});
+  const maps = Object.values(raw.maps?.maps || {}).filter((m) => m && m.id).map((m) => {
+    const switchName = new Map((m.switches || []).filter(Boolean).map((s) => [s.id, tM(s.name)]));
+    return {
+      id: m.id, name: tM(m.name), normalizedName: m.normalizedName, raidDuration: m.raidDuration ?? null, players: m.players ?? null,
+      wiki: m.wiki || null,
+      extracts: (m.extracts || []).filter((e) => e && e.position).map((e) => ({
+        id: e.id,
+        name: tM(e.name),
+        nameEn: tMEn(e.name),
+        faction: e.faction || "",
+        position: xz(e.position),
+        switches: (e.switches || (e.switch ? [e.switch] : [])).map((id) => switchName.get(id) || id),
+        transferItem: e.transferItem ? { item: e.transferItem.item, count: e.transferItem.count } : null,
+      })),
+      transits: (m.transits || []).filter((x) => x && x.position).map((x) => ({
+        id: String(x.id), name: tM(x.description), nameEn: tMEn(x.description), target: x.map || null, position: xz(x.position),
+      })),
+    };
+  });
 
   const items = Object.values(raw.items?.items || {}).filter((i) => i && i.id).map((i) => ({
     id: i.id,
@@ -203,7 +219,11 @@ export function buildModel(b) {
     },
   }));
 
-  const maps = b.maps.map((m) => ({ ...m }));
+  const maps = b.maps.map((m) => ({
+    ...m,
+    extracts: m.extracts.map((e) => ({ ...e, transferItem: e.transferItem ? { item: itemRef(e.transferItem.item), count: e.transferItem.count } : null })),
+    transits: (m.transits || []).map((x) => ({ ...x, targetName: mapById.get(x.target)?.name || "" })),
+  }));
   const items = [...itemById.values()];
   return { lang: b.lang, tasks, maps, items, itemById, itemRef, vendor, barters: b.barters, index: null };
 }
@@ -274,6 +294,105 @@ export function itemDetail(id) {
     bartersUsing: (ix.bartersUsing.get(id) || []).map(resolveBarter),
     usedInTasks: (ix.usedIn.get(id) || []).map((t) => ({ id: t.id, name: t.name })),
   };
+}
+
+/* ---------- extract descriptions and photos from the EFT wiki ---------- */
+// The wiki's map pages have "Extractions" and "Transits" tables with a photo, faction,
+// availability, requirements and notes for every exit. Fetched only when the user opens one.
+const WIKI_API = "https://escapefromtarkov.fandom.com/api.php";
+const WIKI_MAX_AGE = 7 * 24 * 60 * 60 * 1000;
+
+export function wikiTitle(map) {
+  if (!map?.wiki) return null;
+  try {
+    const part = new URL(map.wiki).pathname.split("/wiki/")[1];
+    return part ? decodeURIComponent(part).replace(/_/g, " ") : null;
+  } catch { return null; }
+}
+export function wikiPageUrl(title, anchor) {
+  return `https://escapefromtarkov.fandom.com/wiki/${encodeURIComponent(title.replace(/ /g, "_"))}${anchor ? "#" + anchor : ""}`;
+}
+// Wiki thumbnails come as .../scale-to-width-down/240; ask the CDN for the size we need.
+export function wikiImage(url, width) {
+  if (!url) return null;
+  if (/\/scale-to-width-down\/\d+/.test(url)) return url.replace(/\/scale-to-width-down\/\d+/, `/scale-to-width-down/${width}`);
+  return url.replace(/\/revision\/latest(?=[/?]|$)/, `/revision/latest/scale-to-width-down/${width}`);
+}
+
+async function wikiJson(params) {
+  const url = `${WIKI_API}?${new URLSearchParams({ ...params, format: "json", origin: "*", redirects: "1" })}`;
+  let res;
+  try { res = await webFetch(url, { headers: { Accept: "application/json" } }); }
+  catch { res = await window.fetch(url, { headers: { Accept: "application/json" } }); }
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const j = await res.json();
+  if (j.error) throw new Error(j.error.info || j.error.code);
+  return j;
+}
+
+export function parseWikiTables(html, kind) {
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  doc.querySelectorAll("br").forEach((br) => br.replaceWith(" "));
+  const imgUrl = (img) => { const s = img.getAttribute("data-src") || img.getAttribute("src") || ""; return /^https?:/.test(s) ? s : null; };
+  const rows = [];
+  for (const table of doc.querySelectorAll("table")) {
+    const trs = [...table.querySelectorAll("tr")];
+    if (trs.length < 2) continue;
+    const head = [...trs[0].children].map((c) => c.textContent.replace(/\s+/g, " ").trim().toLowerCase());
+    const col = (re) => head.findIndex((h) => re.test(h));
+    const iName = col(/^name/);
+    if (iName < 0) continue;
+    const iFaction = col(/faction/), iAlways = col(/always/), iSingle = col(/single/), iReq = col(/requirement|condition/), iNotes = col(/note/);
+    for (const tr of trs.slice(1)) {
+      const cells = [...tr.children];
+      if (cells.length !== head.length) continue; // skip spanned/odd rows rather than misread columns
+      const txt = (i) => (i >= 0 && cells[i] ? cells[i].textContent.replace(/\s+/g, " ").trim() : "");
+      const name = txt(iName);
+      if (!name) continue;
+      const image = [...tr.querySelectorAll("img")].map(imgUrl).find(Boolean) || null;
+      rows.push({ kind, name, faction: txt(iFaction), always: txt(iAlways), single: txt(iSingle), requirements: txt(iReq), notes: txt(iNotes), image });
+    }
+  }
+  return rows;
+}
+
+const wikiPending = new Map();
+export function wikiExtracts(title) {
+  if (!title) return Promise.resolve([]);
+  if (!wikiPending.has(title)) {
+    wikiPending.set(title, loadWikiExtracts(title).finally(() => wikiPending.delete(title)));
+  }
+  return wikiPending.get(title);
+}
+async function loadWikiExtracts(title) {
+  const key = `wiki:v1:${title}`;
+  const cached = await cacheGet(key);
+  if (cached && Date.now() - cached.fetchedAt < WIKI_MAX_AGE) return cached.rows;
+  try {
+    const sec = await wikiJson({ action: "parse", page: title, prop: "sections" });
+    const wanted = (sec.parse?.sections || []).filter((s) => /^\d+$/.test(s.index) && /^(extraction|extract|exfil|transit)/i.test(s.line.trim()));
+    const rows = [];
+    for (const s of wanted) {
+      const kind = /^transit/i.test(s.line.trim()) ? "transit" : "extract";
+      const j = await wikiJson({ action: "parse", page: title, prop: "text", section: s.index, disablelimitreport: "1" });
+      rows.push(...parseWikiTables(j.parse?.text?.["*"] || "", kind));
+    }
+    if (rows.length) await cacheSet(key, { rows, fetchedAt: Date.now() });
+    return rows;
+  } catch (e) {
+    if (cached) return cached.rows;
+    throw e;
+  }
+}
+
+const normName = (s) => (s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+export function matchWiki(rows, entry, kind) {
+  const n = normName(entry.nameEn || entry.name);
+  if (!n) return null;
+  const pool = rows.filter((r) => r.kind === kind);
+  return pool.find((r) => normName(r.name) === n)
+    || pool.find((r) => { const m = normName(r.name); return m.length >= 4 && n.length >= 4 && (m.includes(n) || n.includes(m)); })
+    || null;
 }
 
 /* ---------- tiny IndexedDB key/value store ---------- */
