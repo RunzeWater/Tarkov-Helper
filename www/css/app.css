@@ -253,7 +253,24 @@ textarea { width: 100%; font: 12px/1.4 var(--mono); resize: vertical; }
 /* settings */
 .settings { padding: 4px max(16px, env(safe-area-inset-right, 0px)) 16px max(16px, env(safe-area-inset-left, 0px)); display: flex; flex-direction: column; gap: 4px; max-width: 640px; }
 .settings section { display: flex; flex-direction: column; gap: 10px; }
+@media (min-width: 720px) { .settings { width: 100%; margin: 0 auto; } }
 .field { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.small { font-size: 13px; }
+.btn:disabled { opacity: .6; }
+.sync-steps { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; color: var(--muted); font-size: 14px; line-height: 1.5; }
+.sync-steps a { white-space: nowrap; }
+.sync-row { display: flex; gap: 8px; }
+.sync-row input { flex: 1; min-width: 0; background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); padding: 9px 10px; font: 14px/1.2 var(--mono); }
+.sync-row .btn { flex: none; }
+.sync-msg { color: var(--bad); font-size: 13px; }
+.sync-msg:empty { display: none; }
+.sync-status { margin: 0; display: grid; grid-template-columns: 8px 1fr; column-gap: 10px; align-items: baseline; background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); padding: 10px 12px; font-size: 14px; }
+.sync-status::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--ok); transform: translateY(-1px); }
+.sync-status small { grid-column: 2; color: var(--muted); font-size: 13px; }
+.sync-status.warn::before { background: var(--warn); }
+.sync-status.warn small { color: var(--warn); }
+.sync-status.err::before { background: var(--bad); }
+.sync-status.err small { color: var(--bad); }
 
 /* toast */
 .toast { position: fixed; left: 50%; bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom, 0px) + 12px); transform: translate(-50%, 20px); opacity: 0; pointer-events: none; z-index: 1100; background: var(--fg); color: var(--bg); padding: 9px 14px; border-radius: var(--r); font-size: 14px; max-width: calc(100% - 32px); transition: opacity .2s, transform .2s; }

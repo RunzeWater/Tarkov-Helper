@@ -3,6 +3,7 @@ import * as api from "./api.js";
 import { MAP_CONFIG } from "./maps-config.js";
 import { HK_MAPS, HK_TILES, HK_SITE } from "./hk-maps.js";
 import { LANDMARK_ZH } from "./landmarks.js";
+import * as sync from "./sync.js";
 
 /* ---------- helpers ---------- */
 const $ = (s, el = document) => el.querySelector(s);
@@ -30,7 +31,39 @@ try {
   const raw = localStorage.getItem(STORE_KEY);
   if (raw) { const p = JSON.parse(raw); S = { ...S, ...p, f: { ...S.f, ...(p.f || {}) } }; }
 } catch { /* storage blocked: defaults only */ }
-const save = () => { try { localStorage.setItem(STORE_KEY, JSON.stringify(S)); } catch { /* ignore */ } };
+const save = () => {
+  try { localStorage.setItem(STORE_KEY, JSON.stringify(S)); } catch { /* ignore */ }
+  if (sync.isOn()) sync.noteLocal(progressFlat());
+};
+
+/* ---------- progress as flat entries (what gets synced between devices) ---------- */
+// d: done quest, o: done objective, t: on the to-do list, h: items you have, l: trader LL above 1,
+// lv: player level above 1, fa: faction when not USEC. Defaults are left out.
+function progressFlat() {
+  const f = {};
+  for (const id of Object.keys(S.done)) f["d:" + id] = 1;
+  for (const id of Object.keys(S.objDone)) f["o:" + id] = 1;
+  for (const id of Object.keys(S.tracked)) f["t:" + id] = 1;
+  for (const [k, n] of Object.entries(S.have)) if (n > 0) f["h:" + k] = n;
+  for (const [k, n] of Object.entries(S.ll)) if (n > 1) f["l:" + k] = n;
+  if (S.level > 1) f.lv = S.level;
+  if (S.faction !== "USEC") f.fa = S.faction;
+  return f;
+}
+function applyProgressFlat(f) {
+  const done = {}, objDone = {}, tracked = {}, have = {}, ll = {};
+  for (const [k, v] of Object.entries(f)) {
+    const p = k.slice(0, 2), id = k.slice(2);
+    if (!id) continue;
+    if (p === "d:") done[id] = true;
+    else if (p === "o:") objDone[id] = true;
+    else if (p === "t:") tracked[id] = true;
+    else if (p === "h:" && v > 0) have[id] = Math.round(v);
+    else if (p === "l:" && v > 1) ll[id] = Math.min(4, Math.round(v));
+  }
+  Object.assign(S, { done, objDone, tracked, have, ll, level: Math.max(1, Math.min(79, Math.round(f.lv) || 1)), faction: f.fa === "BEAR" ? "BEAR" : "USEC" });
+  save();
+}
 
 /* ---------- game data ---------- */
 const TRADER_ORDER = ["prapor", "therapist", "fence", "skier", "peacekeeper", "mechanic", "ragman", "jaeger", "ref", "lightkeeper", "btr-driver"];
@@ -1271,6 +1304,52 @@ function openItem(id) {
 
 /* ---------- settings ---------- */
 let resetArmed = false;
+let syncConnecting = false;
+function syncErrText(code) {
+  return ({ auth: t("syncErrAuth"), scope: t("syncErrScope"), net: t("syncErrNet"), rate: t("syncErrRate"), empty: t("syncEmpty") })[code] || t("syncErr", { msg: code });
+}
+function syncSectionHTML() {
+  const s = sync.syncInfo();
+  const needToken = !s.on || s.err === "auth" || s.err === "scope";
+  let status = "";
+  if (s.on) {
+    const cls = s.err ? (s.err === "net" || s.err === "rate" ? "warn" : "err") : "";
+    const line2 = s.busy ? t("syncing") : s.err ? syncErrText(s.err) : s.at ? t("syncLast", { time: ago(s.at) }) : "";
+    status = `<p class="sync-status ${cls}"><span>${esc(t("syncOn", { user: s.login }))}</span>${line2 ? `<small>${esc(line2)}</small>` : ""}</p>`;
+  }
+  return `<section id="sync-section"><h3>${esc(t("syncTitle"))}</h3>
+    ${status}
+    ${s.on ? "" : `<p class="plain muted">${esc(t("syncHint"))}</p>`}
+    ${needToken ? `<ol class="sync-steps">
+        <li>${esc(t("syncStep1"))} <a href="${sync.TOKEN_URL}" target="_blank" rel="noopener">${esc(t("syncTokenLink"))}</a></li>
+        <li>${esc(t("syncStep2"))}</li></ol>
+      <div class="sync-row"><input id="sync-token" type="password" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="${esc(t("syncTokenPh"))}" aria-label="${esc(t("syncTokenPh"))}">
+        <button class="btn" data-act="sync-connect"${syncConnecting ? " disabled" : ""}>${esc(t(syncConnecting ? "syncConnecting" : "syncConnect"))}</button></div>
+      <p id="sync-msg" class="plain sync-msg" role="status"></p>
+      <p class="plain muted small">${esc(t("syncSafe"))}</p>` : ""}
+    ${s.on ? `<div class="actions">
+        ${needToken ? "" : `<button class="btn" data-act="sync-now"${s.busy ? " disabled" : ""}>${esc(t(s.busy ? "syncing" : "syncNow"))}</button>`}
+        <button class="btn ghost" data-act="sync-off">${esc(t("syncOff"))}</button></div>
+      ${needToken ? "" : `<p class="plain muted small">${esc(t("syncAuto"))}</p>`}` : ""}
+  </section>`;
+}
+function refreshSyncSection() {
+  const sec = $("#sync-section");
+  if (!sec) return;
+  // keep a half-typed token
+  const typed = $("#sync-token")?.value || "";
+  sec.outerHTML = syncSectionHTML();
+  if (typed && $("#sync-token")) $("#sync-token").value = typed;
+}
+// Progress arrived from another device: redraw what shows it.
+function afterSyncPull(n) {
+  toast(t("syncPulled", { n }));
+  if (!G.ready && S.tab !== "settings") return;
+  if (S.tab === "settings") {
+    const a = document.activeElement;
+    if (!(a && a.id === "lvl")) renderSettings();
+  } else refreshUnderlying();
+}
 function renderSettings() {
   const exportText = JSON.stringify({ v: 2, done: Object.keys(S.done), objDone: Object.keys(S.objDone), tracked: Object.keys(S.tracked), have: S.have, level: S.level, faction: S.faction, ll: S.ll });
   // traders whose quests need a loyalty level, in the usual trader order
@@ -1299,6 +1378,7 @@ function renderSettings() {
         <div class="ll-grid">${llTraders.map((tr) => `<div class="ll-row"><span>${esc(tr.name)}</span>
           <div class="stepper"><button data-act="ll" data-trader="${esc(tr.id)}" data-d="-1" aria-label="−">−</button><span class="num" data-ll-of="${esc(tr.id)}">LL${traderLL(tr.id)}</span><button data-act="ll" data-trader="${esc(tr.id)}" data-d="1" aria-label="+">+</button></div></div>`).join("")}</div>
       </section>` : ""}
+      ${syncSectionHTML()}
       <section><h3>${esc(t("data"))}</h3>
         <p class="plain muted">${G.ready ? esc(t("updated", { time: ago(G.fetchedAt) })) : ""}</p>
         <button class="btn" data-act="refresh">${esc(t("refresh"))}</button>
@@ -1405,8 +1485,36 @@ document.addEventListener("click", async (e) => {
       } catch { toast(t("badImport")); }
       break;
     }
+    case "sync-connect": {
+      const input = $("#sync-token");
+      const token = input ? input.value.trim() : "";
+      const msg = $("#sync-msg");
+      if (!token) { if (msg) msg.textContent = syncErrText("empty"); break; }
+      syncConnecting = true; refreshSyncSection();
+      try {
+        const info = await sync.connect(token);
+        syncConnecting = false;
+        if (S.tab === "settings") renderSettings();
+        if (info.err) toast(syncErrText(info.err)); else toast(t("syncConnected"));
+      } catch (err) {
+        syncConnecting = false;
+        refreshSyncSection();
+        const m = $("#sync-msg");
+        if (m) m.textContent = syncErrText(err.message);
+      }
+      break;
+    }
+    case "sync-now": {
+      const before = sync.syncInfo().at;
+      const pulled = await sync.syncNow();
+      const s = sync.syncInfo();
+      if (!s.err && !pulled && s.at !== before) toast(t("syncDone"));
+      else if (s.err) toast(syncErrText(s.err));
+      break;
+    }
+    case "sync-off": sync.disconnect(); toast(t("syncOffDone")); if (S.tab === "settings") renderSettings(); break;
     case "reset": {
-      if (!resetArmed) { resetArmed = true; el.textContent = t("resetConfirm"); setTimeout(() => { resetArmed = false; if (el.isConnected) el.textContent = t("reset"); }, 4000); break; }
+      if (!resetArmed) { resetArmed = true; el.textContent = t(sync.isOn() ? "resetConfirmSync" : "resetConfirm"); setTimeout(() => { resetArmed = false; if (el.isConnected) el.textContent = t("reset"); }, 4000); break; }
       resetArmed = false; S.done = {}; S.objDone = {}; S.have = {}; S.tracked = {}; save(); toast(t("resetDone")); renderSettings(); break;
     }
   }
@@ -1421,6 +1529,12 @@ function refreshUnderlying() {
 setLang(S.lang);
 renderShell();
 loadData();
+sync.startSync({
+  getFlat: progressFlat,
+  setFlat: applyProgressFlat,
+  onPulled: afterSyncPull,
+  onStatus: () => { if (S.tab === "settings") refreshSyncSection(); },
+});
 if ("serviceWorker" in navigator && !window.Capacitor && location.protocol === "https:") {
   navigator.serviceWorker.register("sw.js").catch(() => {});
 }
