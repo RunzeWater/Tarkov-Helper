@@ -168,7 +168,7 @@ async function locateGist() {
 }
 
 async function syncOnce() {
-  if (!st.gistId && await locateGist()) return 0;
+  if (!st.gistId && await locateGist()) { st.at = Date.now(); persist(); return 0; }
   let r;
   try {
     r = await gh(`/gists/${st.gistId}`, { etag: st.etag });
@@ -177,7 +177,7 @@ async function syncOnce() {
     // the gist was deleted on GitHub: find another one or start a new one
     Object.assign(st, { gistId: null, etag: null, dirty: true });
     persist();
-    if (await locateGist()) return 0;
+    if (await locateGist()) { st.at = Date.now(); persist(); return 0; }
     r = await gh(`/gists/${st.gistId}`);
   }
   let remote = null; // null: unchanged since this device last merged it

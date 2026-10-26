@@ -4,6 +4,7 @@ import { MAP_CONFIG } from "./maps-config.js";
 import { HK_MAPS, HK_TILES, HK_SITE } from "./hk-maps.js";
 import { LANDMARK_ZH } from "./landmarks.js";
 import * as sync from "./sync.js";
+import { STORY, ENDINGS, ENDING_RULES, STORY_UPDATED, storyWiki } from "./story.js";
 
 /* ---------- helpers ---------- */
 const $ = (s, el = document) => el.querySelector(s);
@@ -19,6 +20,7 @@ const STORE_KEY = "tkh.v1";
 const DEFAULTS = {
   lang: "zh", mode: "regular", level: 1, faction: "USEC",
   done: {}, objDone: {}, have: {}, tracked: {},
+  story: {}, taskMode: "side", // story chapter steps done; tasks tab shows side quests or the story
   ll: {}, llTipHidden: false, // trader loyalty levels by trader id (1-4)
   tab: "tasks",
   f: { q: "", trader: "", map: "", ll: "", status: "available", kappa: false, lk: false },
@@ -38,12 +40,13 @@ const save = () => {
 
 /* ---------- progress as flat entries (what gets synced between devices) ---------- */
 // d: done quest, o: done objective, t: on the to-do list, h: items you have, l: trader LL above 1,
-// lv: player level above 1, fa: faction when not USEC. Defaults are left out.
+// s: story chapter step done, lv: player level above 1, fa: faction when not USEC. Defaults are left out.
 function progressFlat() {
   const f = {};
   for (const id of Object.keys(S.done)) f["d:" + id] = 1;
   for (const id of Object.keys(S.objDone)) f["o:" + id] = 1;
   for (const id of Object.keys(S.tracked)) f["t:" + id] = 1;
+  for (const id of Object.keys(S.story)) f["s:" + id] = 1;
   for (const [k, n] of Object.entries(S.have)) if (n > 0) f["h:" + k] = n;
   for (const [k, n] of Object.entries(S.ll)) if (n > 1) f["l:" + k] = n;
   if (S.level > 1) f.lv = S.level;
@@ -51,17 +54,18 @@ function progressFlat() {
   return f;
 }
 function applyProgressFlat(f) {
-  const done = {}, objDone = {}, tracked = {}, have = {}, ll = {};
+  const done = {}, objDone = {}, tracked = {}, have = {}, ll = {}, story = {};
   for (const [k, v] of Object.entries(f)) {
     const p = k.slice(0, 2), id = k.slice(2);
     if (!id) continue;
     if (p === "d:") done[id] = true;
     else if (p === "o:") objDone[id] = true;
     else if (p === "t:") tracked[id] = true;
+    else if (p === "s:") story[id] = true;
     else if (p === "h:" && v > 0) have[id] = Math.round(v);
     else if (p === "l:" && v > 1) ll[id] = Math.min(4, Math.round(v));
   }
-  Object.assign(S, { done, objDone, tracked, have, ll, level: Math.max(1, Math.min(79, Math.round(f.lv) || 1)), faction: f.fa === "BEAR" ? "BEAR" : "USEC" });
+  Object.assign(S, { done, objDone, tracked, have, ll, story, level: Math.max(1, Math.min(79, Math.round(f.lv) || 1)), faction: f.fa === "BEAR" ? "BEAR" : "USEC" });
   save();
 }
 
@@ -275,12 +279,19 @@ function filteredTasks() {
     return taskMatches(task, f.q);
   });
 }
+function modeSegHTML() {
+  return `<div class="seg mode-seg" role="group" aria-label="${esc(t("tabTasks"))}">
+    <button data-act="task-mode" data-v="side" aria-pressed="${S.taskMode !== "story"}">${esc(t("modeSide"))}</button>
+    <button data-act="task-mode" data-v="story" aria-pressed="${S.taskMode === "story"}">${esc(t("modeStory"))}</button></div>`;
+}
 function renderTasks() {
+  if (S.taskMode === "story") { renderStory(); return; }
   const f = S.f;
   const seenMap = new Set();
   const mapOpts = G.maps.filter((m) => { const k = cfgKeyFor(m.normalizedName) || m.normalizedName; if (seenMap.has(k)) return false; seenMap.add(k); return true; });
   $("#view").innerHTML = `
     <div class="filters">
+      ${modeSegHTML()}
       <label class="search"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM20 20l-4-4"/></svg>
         <input id="task-q" type="search" placeholder="${esc(t("search"))}" value="${esc(f.q)}" autocomplete="off"></label>
       <div class="seg" role="group">${STATUS_KEYS.map(([k, l]) => `<button data-act="status" data-v="${k}" aria-pressed="${f.status === k}">${esc(t(l))}</button>`).join("")}</div>
@@ -338,6 +349,143 @@ function renderTaskList() {
       </button>
       ${st !== "done" ? `<button class="track" data-act="toggle-track" data-id="${task.id}" aria-pressed="${tracked}">${esc(t(tracked ? "tracking" : "track"))}</button>` : ""}</li>`;
   }).join("");
+}
+
+/* ---------- story chapters ---------- */
+const lx = (o) => // pick the current language from a {zh, en} text
+  (o ? o[getLang()] || o.zh || o.en || "" : "");
+const MAP_NAMES = {
+  "ground-zero": ["中心区", "Ground Zero"], "streets-of-tarkov": ["塔科夫街区", "Streets of Tarkov"], customs: ["海关", "Customs"],
+  factory: ["工厂", "Factory"], interchange: ["立交桥", "Interchange"], woods: ["森林", "Woods"], shoreline: ["海岸线", "Shoreline"],
+  reserve: ["储备站", "Reserve"], lighthouse: ["灯塔", "Lighthouse"], "the-lab": ["实验室", "The Lab"], "the-labyrinth": ["迷宫", "The Labyrinth"],
+  icebreaker: ["破冰船", "Icebreaker"], terminal: ["终端", "Terminal"],
+};
+function mapLabel(key) {
+  const m = G.maps.find((x) => cfgKeyFor(x.normalizedName) === key);
+  if (m) return m.name;
+  const n = MAP_NAMES[key];
+  return n ? n[getLang() === "en" ? 1 : 0] : key;
+}
+const stepText = (st) => (getLang() === "en" ? st[3] : st[2]);
+const storySteps = (ch) => ch.steps.filter((st) => st[0] !== "#");
+const stepRequired = (st) => !/[or]/.test(st[4] || ""); // optional and route-only steps don't count toward progress
+function chapterProgress(ch) {
+  const req = storySteps(ch).filter(stepRequired);
+  return [req.filter((st) => S.story[st[0]]).length, req.length];
+}
+function chapterMaps(ch) {
+  const out = [];
+  for (const st of storySteps(ch)) for (const k of [].concat(st[1] || [])) if (!out.includes(k)) out.push(k);
+  return out;
+}
+function renderStory() {
+  $("#view").innerHTML = `
+    <div class="filters">
+      ${modeSegHTML()}
+      <div class="story-intro"><p>${esc(t("storyIntro"))}</p>
+        <button class="btn ghost sm" data-act="story-endings">${esc(t("storyEndings"))}</button></div>
+    </div>
+    <ul id="story-list" class="list story-list"></ul>
+    <p class="hint story-src">${esc(t("storySrc", { date: STORY_UPDATED }))}</p>`;
+  renderStoryList();
+}
+function renderStoryList() {
+  const ul = $("#story-list");
+  if (!ul) return;
+  const rows = [];
+  for (const [kind, label] of [["main", "storyMain"], ["inv", "storyInv"]]) {
+    rows.push(`<li class="sub">${esc(t(label))}</li>`);
+    for (const ch of STORY.filter((c) => c.kind === kind)) {
+      const [d, n] = chapterProgress(ch);
+      const done = n > 0 && d === n;
+      const maps = chapterMaps(ch).map(mapLabel);
+      rows.push(`<li class="task chapter${done ? " st-done" : ""}">
+        <span class="ch-no" aria-hidden="true">${ch.n}</span>
+        <button class="task-main" data-act="open-chapter" data-id="${ch.id}">
+          <span class="task-name">${esc(lx(ch.name))}${getLang() !== "en" ? ` <small>${esc(ch.name.en)}</small>` : ""}</span>
+          <span class="task-meta">${esc(maps.slice(0, 4).join(" / "))}${maps.length > 4 ? " …" : ""}</span>
+          <span class="task-tags"><span class="tag prog">${d}/${n}</span>${done ? `<span class="tag ok">${esc(t("stDone"))}</span>` : d ? `<span class="tag">${esc(t("storyGoing"))}</span>` : ""}</span>
+          <span class="ch-bar" aria-hidden="true"><i style="width:${n ? Math.round((d / n) * 100) : 0}%"></i></span>
+        </button></li>`);
+    }
+  }
+  ul.innerHTML = rows.join("");
+}
+function storyStepHTML(ch, st) {
+  if (st[0] === "#") return `<li class="step-sec">${esc(stepText(st))}</li>`;
+  const [sid, mp, , , fl = ""] = st;
+  const done = !!S.story[sid];
+  const open = new Set(mapOptions().map((o) => o.key));
+  const maps = [].concat(mp || []);
+  const tags = [
+    fl.includes("!") ? `<span class="tag warn">${esc(t("storyNoReturn"))}</span>` : "",
+    fl.includes("o") ? `<span class="tag">${esc(t("optional"))}</span>` : "",
+    fl.includes("r") ? `<span class="tag">${esc(t("storyRoute"))}</span>` : "",
+    ...maps.map((k) => (open.has(k)
+      ? `<button class="tag map-tag" data-act="story-map" data-map="${k}" aria-label="${esc(t("storyOnMap", { map: mapLabel(k) }))}">${esc(mapLabel(k))} ›</button>`
+      : `<span class="tag">${esc(mapLabel(k))}</span>`)),
+  ].filter(Boolean);
+  return `<li class="obj${done ? " is-done" : ""}">
+    <button class="check sm" data-act="story-step" data-id="${sid}" aria-pressed="${done}" aria-label="${esc(t(done ? "markUndone" : "markDone"))}"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></button>
+    <div class="obj-body"><p>${esc(stepText(st))}</p>${tags.length ? `<p class="step-tags">${tags.join("")}</p>` : ""}</div></li>`;
+}
+function openChapter(id) {
+  const ch = STORY.find((c) => c.id === id);
+  if (!ch) return;
+  const [d, n] = chapterProgress(ch);
+  openSheet(`
+    <div class="sheet-head">
+      <div><p class="eyebrow">${esc(ch.kind === "main" ? t("storyMainN", { n: ch.n }) : t("storyInv"))}</p>
+        <h2>${esc(lx(ch.name))}</h2>${getLang() !== "en" ? `<p class="sub-en">${esc(ch.name.en)}</p>` : ""}</div>
+      <button class="icon-btn" data-act="close-sheet" aria-label="${esc(t("close"))}"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+    </div>
+    <p class="story-about">${esc(lx(ch.about))}</p>
+    <div class="facts">
+      <div><span>${esc(t("storyProgress"))}</span><b>${d}/${n}</b></div>
+      <div><span>${esc(t("storyMapsN"))}</span><b>${chapterMaps(ch).length}</b></div>
+    </div>
+    <div class="actions">
+      ${ch.endings ? `<button class="btn" data-act="story-endings">${esc(t("storyEndings"))}</button>` : ""}
+      <a class="btn ghost" href="${esc(storyWiki(ch.wiki))}" target="_blank" rel="noopener">${esc(t("wiki"))} ↗</a>
+    </div>
+    <h3>${esc(t("storyUnlock"))}</h3>
+    <p class="plain">${esc(lx(ch.unlock))}</p>
+    <h3>${esc(t("storySteps"))}</h3>
+    <ol class="objs story-steps">${ch.steps.map((st) => storyStepHTML(ch, st)).join("")}</ol>
+    <h3>${esc(t("storyReward"))}</h3>
+    <p class="plain">${esc(lx(ch.reward))}</p>
+    ${ch.tips && ch.tips.length ? `<h3>${esc(t("storyTips"))}</h3><ul class="story-tips">${ch.tips.map((x) => `<li>${esc(lx(x))}</li>`).join("")}</ul>` : ""}
+    <p class="hint story-note">${esc(t("storySrc", { date: STORY_UPDATED }))}</p>`);
+  curChapter = id;
+}
+// Redraw the open chapter in place (after a tick or a sync), keeping the scroll position.
+function redrawChapter() {
+  if (!curChapter || !sheetOpen) return;
+  const panel = $(".sheet-panel");
+  const top = panel ? panel.scrollTop : 0;
+  openChapter(curChapter);
+  if (panel) panel.scrollTop = top;
+}
+function openEndings() {
+  const ticket = STORY.find((c) => c.endings);
+  openSheet(`
+    <div class="sheet-head">
+      <div><p class="eyebrow">${esc(lx(ticket.name))}</p><h2>${esc(t("storyEndings"))}</h2></div>
+      <button class="icon-btn" data-act="close-sheet" aria-label="${esc(t("close"))}"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+    </div>
+    <p class="story-about">${esc(t("endingsIntro"))}</p>
+    <div class="endings">${ENDINGS.map((e) => `<section class="ending ${e.color}">
+      <h4>${esc(lx(e.name))}${getLang() !== "en" ? ` <small>${esc(e.name.en)}</small>` : ""}</h4>
+      <dl>
+        <dt>${esc(t("endRoute"))}</dt><dd>${esc(lx(e.route))}</dd>
+        <dt>${esc(t("endNeed"))}</dt><dd>${esc(lx(e.need))}</dd>
+        <dt>${esc(t("endAccess"))}</dt><dd>${esc(lx(e.access))}</dd>
+        <dt>${esc(t("endReward"))}</dt><dd>${esc(lx(e.reward))}</dd>
+      </dl></section>`).join("")}</div>
+    <h3>${esc(t("endRules"))}</h3>
+    <ul class="story-tips">${ENDING_RULES.map((x) => `<li>${esc(lx(x))}</li>`).join("")}</ul>
+    <div class="actions"><button class="btn ghost" data-act="open-chapter" data-id="${ticket.id}">${esc(t("endBack", { name: lx(ticket.name) }))}</button></div>
+    <p class="hint story-note">${esc(t("storySrc", { date: STORY_UPDATED }))}</p>`);
 }
 
 function setDone(id, value) {
@@ -508,7 +656,9 @@ function openTask(id) {
 
 /* ---------- sheet (bottom panel) with Android back-button support ---------- */
 let sheetOpen = false;
+let curChapter = null; // story chapter shown in the sheet, so a sync can redraw it
 function openSheet(html) {
+  curChapter = null;
   $("#sheet-body").innerHTML = html;
   $(".sheet-panel").scrollTop = 0;
   if (sheetOpen) return; // nested views replace the content; Back always closes the sheet
@@ -521,6 +671,7 @@ function openSheet(html) {
 function hideSheet() {
   const sheet = $("#sheet");
   sheetOpen = false;
+  curChapter = null;
   sheet.classList.remove("open");
   setTimeout(() => { if (!sheetOpen) sheet.hidden = true; }, 220);
 }
@@ -1344,6 +1495,7 @@ function refreshSyncSection() {
 // Progress arrived from another device: redraw what shows it.
 function afterSyncPull(n) {
   toast(t("syncPulled", { n }));
+  if (curChapter && sheetOpen) redrawChapter();
   if (!G.ready && S.tab !== "settings") return;
   if (S.tab === "settings") {
     const a = document.activeElement;
@@ -1351,7 +1503,7 @@ function afterSyncPull(n) {
   } else refreshUnderlying();
 }
 function renderSettings() {
-  const exportText = JSON.stringify({ v: 2, done: Object.keys(S.done), objDone: Object.keys(S.objDone), tracked: Object.keys(S.tracked), have: S.have, level: S.level, faction: S.faction, ll: S.ll });
+  const exportText = JSON.stringify({ v: 2, done: Object.keys(S.done), objDone: Object.keys(S.objDone), tracked: Object.keys(S.tracked), story: Object.keys(S.story), have: S.have, level: S.level, faction: S.faction, ll: S.ll });
   // traders whose quests need a loyalty level, in the usual trader order
   const llTraders = [];
   const seenTr = new Set();
@@ -1412,6 +1564,20 @@ document.addEventListener("click", async (e) => {
     case "kappa": S.f.kappa = !S.f.kappa; save(); renderTasks(); break;
     case "lk": S.f.lk = !S.f.lk; save(); renderTasks(); break;
     case "open-task": if (LMAP) LMAP.closePopup(); openTask(id); break;
+    case "task-mode": if (v !== S.taskMode) { S.taskMode = v; save(); renderTasks(); } break;
+    case "open-chapter": openChapter(id); break;
+    case "story-step": {
+      if (S.story[id]) delete S.story[id]; else S.story[id] = true;
+      save(); redrawChapter(); renderStoryList(); break;
+    }
+    case "story-endings": openEndings(); break;
+    case "story-map": {
+      const key = el.dataset.map;
+      if (sheetOpen) closeSheet();
+      S.mapKey = key; save();
+      setTimeout(() => setTab("map"), sheetOpen ? 240 : 0);
+      break;
+    }
     case "toggle-done": setDone(id, !S.done[id]); renderTaskList(); break;
     case "toggle-track": toggleTrack(id); renderTaskList(); break;
     case "toggle-track-sheet": toggleTrack(id); openTask(id); refreshUnderlying(); break;
@@ -1479,9 +1645,10 @@ document.addEventListener("click", async (e) => {
         S.done = Object.fromEntries(p.done.map((x) => [x, true]));
         S.objDone = Object.fromEntries((p.objDone || []).map((x) => [x, true]));
         if (Array.isArray(p.tracked)) S.tracked = Object.fromEntries(p.tracked.map((x) => [x, true]));
+        if (Array.isArray(p.story)) S.story = Object.fromEntries(p.story.map((x) => [x, true]));
         if (p.ll && typeof p.ll === "object") S.ll = Object.fromEntries(Object.entries(p.ll).map(([k, n]) => [k, Math.max(1, Math.min(4, parseInt(n, 10) || 1))]));
         S.have = p.have || {}; if (p.level) S.level = p.level; if (p.faction) S.faction = p.faction;
-        save(); toast(t("imported", { n: p.done.length })); renderSettings();
+        save(); toast(t("imported", { n: p.done.length }) + (Array.isArray(p.story) && p.story.length ? t("importedStory", { n: p.story.length }) : "")); renderSettings();
       } catch { toast(t("badImport")); }
       break;
     }
@@ -1515,12 +1682,13 @@ document.addEventListener("click", async (e) => {
     case "sync-off": sync.disconnect(); toast(t("syncOffDone")); if (S.tab === "settings") renderSettings(); break;
     case "reset": {
       if (!resetArmed) { resetArmed = true; el.textContent = t(sync.isOn() ? "resetConfirmSync" : "resetConfirm"); setTimeout(() => { resetArmed = false; if (el.isConnected) el.textContent = t("reset"); }, 4000); break; }
-      resetArmed = false; S.done = {}; S.objDone = {}; S.have = {}; S.tracked = {}; save(); toast(t("resetDone")); renderSettings(); break;
+      resetArmed = false; S.done = {}; S.objDone = {}; S.have = {}; S.tracked = {}; S.story = {}; save(); toast(t("resetDone")); renderSettings(); break;
     }
   }
 });
 function refreshUnderlying() {
   if (S.tab === "tasks" && $("#task-list")) renderTaskList();
+  else if (S.tab === "tasks" && $("#story-list")) renderStoryList();
   else if (S.tab === "items" && $("#item-list")) renderItemList();
   else if (S.tab === "map") { destroyMap(); renderMap(); }
 }

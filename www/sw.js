@@ -1,6 +1,6 @@
 // Offline shell for the installable web version. Game data is cached by the app itself (IndexedDB).
-const CACHE = "tkh-shell-v3";
-const SHELL = ["./", "index.html", "css/app.css", "js/app.js", "js/api.js", "js/i18n.js", "js/maps-config.js", "js/hk-maps.js", "js/landmarks.js", "js/sync.js",
+const CACHE = "tkh-shell-v4";
+const SHELL = ["./", "index.html", "css/app.css", "js/app.js", "js/api.js", "js/i18n.js", "js/maps-config.js", "js/hk-maps.js", "js/landmarks.js", "js/sync.js", "js/story.js",
   "vendor/leaflet/leaflet.js", "vendor/leaflet/leaflet.css", "manifest.webmanifest", "icons/icon-192.png"];
 self.addEventListener("install", (e) => { e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL))); self.skipWaiting(); });
 self.addEventListener("activate", (e) => {
